@@ -1,2 +1,3 @@
 *.py linguist-vendored
-*.co linguist-language=Cobra
+*.co linguist-language=Python
+*.co linguist-alias=Cobra
