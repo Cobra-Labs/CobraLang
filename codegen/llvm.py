@@ -157,22 +157,52 @@ class LLVMCodegen:
         self.emit(f"  {reg} = call i32 @{node.name}({args_ir})")
         return (reg, "i32")
 
+    # In LLVMCodegen Klasse ergänzen:
+
+    def gen_call(self, node: FuncCall) -> tuple[str, str]:
+        # Spezieller Case für Syscalls
+        if node.name.startswith("syscall"):
+            return self.gen_syscall(node)
+
+        args = [self.gen_expr(a) for a in node.args]
+        args_ir = ", ".join(f"{t} {r}" for r, t in args)
+        reg = self.fresh()
+        # Hole den Rückgabetyp (hier vereinfacht i32, sollte aus TypeChecker kommen)
+        self.emit(f"  {reg} = call i32 @{node.name}({args_ir})")
+        return (reg, "i32")
+
+    def gen_syscall(self, node: FuncCall) -> tuple[str, str]:
+        args = [self.gen_expr(a) for a in node.args]
+        # x86_64 syscall pattern (rax, rdi, rsi, rdx, r10, r8, r9)
+        # Wir unterstützen hier der Einfachheit halber bis zu 3 Argumente + Nummer
+        arg_types = ", ".join(t for r, t in args)
+        arg_values = ", ".join(f"{t} {r}" for r, t in args)
+
+        # Constraints für rax, rdi, rsi, rdx
+        constraints = "={ax},{ax},{di},{si},{dx},~{dirflag},~{fpsr},~{flags}"
+
+        reg = self.fresh()
+        asm_ty = f"i64 ({arg_types})"
+        self.emit(f'  {reg} = call i64 asm sideeffect "syscall", "{constraints}"({arg_values})')
+        return (reg, "i64")
+
 from lexer import tokenize
 from parser import Parser
 from checker import TypeChecker
 
-source = """\
-def add(a: i32, b: i32) -> i32:
-    let result: i32 = a + b
-    return result
+source = """
+def _start() -> void:
+    let msg: ptr<u8> = "Hello Cobra World!\\nThis is the first ever printed line in the Cobra Language - compiled for x86_64 ELF (Linux)! "
+    # syscall(number=1 [write], fd=1 [stdout], buf=msg, len=19)
+    syscall(1, 1, msg, 19)
 
-def main() -> i32:
-    let x: i32 = add(1, 2)
-    return x
+    # syscall(number=60 [exit], code=0)
+    syscall(60, 0, 0, 0)
 """
 
 tokens  = tokenize(source)
 tree    = Parser(tokens).parse()
 TypeChecker(tree).check()
 ir      = LLVMCodegen(tree).generate()
-print(ir)
+f = open("../test.ll", "w")
+f.write(ir)

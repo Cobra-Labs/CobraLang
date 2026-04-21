@@ -1,6 +1,11 @@
 from lexer import tokenize
 from parser import Parser
 
+BUILTINS = {
+    "syscall",
+    "cast",
+}
+
 # typechecker.py
 from parser import *
 
@@ -71,6 +76,14 @@ class TypeChecker:
     def infer_type(self, node) -> str:
         if isinstance(node, Number):
             return "i32"
+
+        if isinstance(node, FuncCall):
+            if node.name in BUILTINS:
+                if node.name == "syscall": return "i64"
+                if node.name == "cast":    return "ptr<u8>"  # Platzhalter
+
+            if node.name not in self.funcs:
+                raise TypeError(f"Unbekannte Funktion '{node.name}'")
 
         if isinstance(node, StringLit):
             return "ptr<u8>"

@@ -112,7 +112,7 @@ class Parser:
         while self.peek().type != "RPAREN":
             pname = self.eat("IDENT").value
             self.eat("COLON")
-            ptype = self.eat("TYPE").value
+            ptype = self.parse_type()
             params.append((pname, ptype))
             if self.peek().type == "COMMA":
                 self.eat("COMMA")
@@ -132,10 +132,11 @@ class Parser:
         self.eat("KEYWORD", "let")
         name = self.eat("IDENT").value
         self.eat("COLON")
-        type = self.eat("TYPE").value
+        # Geändert von self.eat("TYPE") zu:
+        type_str = self.parse_type()
         self.eat("OP", "=")
         value = self.parse_expr()
-        return LetStmt(name, type, value)
+        return LetStmt(name, type_str, value)
 
     def parse_return(self):
         self.eat("KEYWORD", "return")
@@ -155,6 +156,16 @@ class Parser:
             else_body = self.parse_block()
 
         return IfStmt(condition, then_body, else_body)
+
+    def parse_type(self) -> str:
+        t = self.eat("TYPE").value
+        # Wenn ein < folgt, lesen wir den generischen Teil (z.B. <u8>)
+        if self.peek().value == "<":
+            self.eat("OP", "<")
+            inner = self.parse_type()  # Rekursiv für verschachtelte Typen
+            self.eat("OP", ">")
+            return f"{t}<{inner}>"
+        return t
 
     def parse_block(self):
         stmts = []
