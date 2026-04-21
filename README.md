@@ -42,6 +42,16 @@ Cobra nutzt das **LLVM-Backend**, um hochoptimierten Code zu erzeugen.
 
 ---
 
+## 🛠️ Contact & Support
+
+If you have questions about **Cobra**, our **CPU architectures**, or the **Open Fixture Language**, feel free to reach out!
+
+* 📧 **Email:** [support-cobralabs@proton.me](mailto:support-cobralabs@proton.me)
+* 🌐 **GitHub Org:** [github.com/CobraLabs](#) (Link anpassen)
+* ☕ **Support our work:** [Support us on Ko-fi](https://ko-fi.com)
+
+---
+
 ## 🗺 Roadmap
 
 - [x] Sprach-Design
