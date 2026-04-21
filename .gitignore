@@ -1,0 +1,18 @@
+# Python-Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtuelle Umgebung
+.venv/
+venv/
+ENV/
+
+# PyCharm / IntelliJ Einstellungen
+.idea/
+
+# Lokale LLVM/Build Artefakte (falls du welche generierst)
+*.ll
+*.s
+*.o
+*.out
