@@ -1,0 +1,277 @@
+# Token-Typ Konstanten
+let TOK_IDENT: i32 = 1
+let TOK_NUMBER: i32 = 2
+let TOK_STRING: i32 = 3
+let TOK_KEYWORD: i32 = 4
+let TOK_TYPE: i32 = 5
+let TOK_OP: i32 = 6
+let TOK_COLON: i32 = 7
+let TOK_COMMA: i32 = 8
+let TOK_LPAREN: i32 = 9
+let TOK_RPAREN: i32 = 10
+let TOK_LBRACE: i32 = 11
+let TOK_RBRACE: i32 = 12
+let TOK_LBRACKET: i32 = 13
+let TOK_RBRACKET: i32 = 14
+let TOK_NEWLINE: i32 = 15
+let TOK_INDENT: i32 = 16
+let TOK_DEDENT: i32 = 17
+let TOK_ARROW: i32 = 18
+let TOK_DOT: i32 = 19
+let TOK_EOF: i32 = 20
+let TOK_COMMENT: i32 = 21
+
+# Token Struct
+struct Token:
+    type: i32
+    start: i32   # Index im Source-String
+    length: i32  # Länge
+    line: i32
+
+def is_alpha(c: u8) -> i32:
+    if c >= 'a':
+        if c <= 'z':
+            return 1
+    if c >= 'A':
+        if c <= 'Z':
+            return 1
+    if c == '_':
+        return 1
+    return 0
+
+def is_digit(c: u8) -> i32:
+    if c >= '0':
+        if c <= '9':
+            return 1
+    return 0
+
+def is_alnum(c: u8) -> i32:
+    if is_alpha(c) == 1:
+        return 1
+    if is_digit(c) == 1:
+        return 1
+    return 0
+
+# ===== Tokenize ===== #
+
+def tokenize(source: ptr<u8>, length: i32, tokens: ptr<Token>, indent_stack: ptr<i32>) -> i32:
+    let i: i32 = 0
+    let tok_count: i32 = 0
+    let line: i32 = 1
+    let indent_depth: i32 = 0
+    let at_line_start: i32 = 1
+
+    while i < length:
+        let c: u8 = source[i]
+
+        # Kommentar
+        if c == '#':
+            while i < length:
+                if source[i] == '\n':
+                    i = i - 1
+                    break
+                i = i + 1
+            i = i + 1
+            continue
+
+        # Whitespace
+        if c == ' ':
+            i = i + 1
+            continue
+        if c == '\t':
+            i = i + 1
+            continue
+
+        # Newline
+        if c == '\n':
+            tokens[tok_count].type = TOK_NEWLINE
+            tokens[tok_count].line = line
+            tok_count = tok_count + 1
+            line = line + 1
+            at_line_start = 1
+            i = i + 1
+            continue
+
+        # Identifier / Keyword
+        if is_alpha(c) == 1:
+            let start: i32 = i
+            while i < length:
+                if is_alnum(source[i]) == 0:
+                    break
+                i = i + 1
+            tokens[tok_count].type = TOK_IDENT
+            tokens[tok_count].start = start
+            tokens[tok_count].length = i - start
+            tokens[tok_count].line = line
+            tok_count = tok_count + 1
+            continue
+
+        # Keyword check
+            if tok_matches(source, start, i - start, "def") == 1:
+                tokens[tok_count].type = TOK_KEYWORD
+            else:
+                if tok_matches(source, start, i - start, "let") == 1:
+                    tokens[tok_count].type = TOK_KEYWORD
+                else:
+                    if tok_matches(source, start, i - start, "return") == 1:
+                        tokens[tok_count].type = TOK_KEYWORD
+                    else:
+                        if tok_matches(source, start, i - start, "if") == 1:
+                            tokens[tok_count].type = TOK_KEYWORD
+                        else:
+                            if tok_matches(source, start, i - start, "while") == 1:
+                                tokens[tok_count].type = TOK_KEYWORD
+                            else:
+                                if tok_matches(source, start, i - start, "for") == 1:
+                                    tokens[tok_count].type = TOK_KEYWORD
+                                else:
+                                    if tok_matches(source, start, i - start, "else") == 1:
+                                        tokens[tok_count].type = TOK_KEYWORD
+                                    else:
+                                        if tok_matches(source, start, i - start, "struct") == 1:
+                                            tokens[tok_count].type = TOK_KEYWORD
+                                        else:
+                                            tokens[tok_count].type = TOK_IDENT
+
+            if tok_matches(source, start, i - start, "i32") == 1:
+                tokens[tok_count].type = TOK_TYPE
+            if tok_matches(source, start, i - start, "i64") == 1:
+                tokens[tok_count].type = TOK_TYPE
+            if tok_matches(source, start, i - start, "u8") == 1:
+                tokens[tok_count].type = TOK_TYPE
+            if tok_matches(source, start, i - start, "ptr") == 1:
+                tokens[tok_count].type = TOK_TYPE
+            if tok_matches(source, start, i - start, "void") == 1:
+                tokens[tok_count].type = TOK_TYPE
+            if tok_matches(source, start, i - start, "bool") == 1:
+                tokens[tok_count].type = TOK_TYPE
+
+            # Zahl
+            if is_digit(c) == 1:
+                let start: i32 = i
+                while i < length:
+                    if is_digit(source[i]) == 0:
+                        break
+                    i = i + 1
+                tokens[tok_count].type = TOK_NUMBER
+                tokens[tok_count].start = start
+                tokens[tok_count].length = i - start
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+                continue
+
+            # String
+            if c == '"':
+                let start: i32 = i
+                i = i + 1
+                while i < length:
+                    if source[i] == '"':
+                        break
+                    i = i + 1
+                i = i + 1
+                tokens[tok_count].type = TOK_STRING
+                tokens[tok_count].start = start
+                tokens[tok_count].length = i - start
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+                continue
+
+            # Einzel-Zeichen Token
+            if c == ':':
+                tokens[tok_count].type = TOK_COLON
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+                i = i + 1
+                continue
+            if c == ',':
+                tokens[tok_count].type = TOK_COMMA
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+                i = i + 1
+                continue
+            if c == '(':
+                tokens[tok_count].type = TOK_LPAREN
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+                i = i + 1
+                continue
+            if c == ')':
+                tokens[tok_count].type = TOK_RPAREN
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+                i = i + 1
+                continue
+            if c == '[':
+                tokens[tok_count].type = TOK_LBRACKET
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+                i = i + 1
+                continue
+            if c == ']':
+                tokens[tok_count].type = TOK_RBRACKET
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+                i = i + 1
+                continue
+            if c == '{':
+                tokens[tok_count].type = TOK_LBRACE
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+                i = i + 1
+                continue
+            if c == '}':
+                tokens[tok_count].type = TOK_RBRACE
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+                i = i + 1
+                continue
+            if c == '.':
+                tokens[tok_count].type = TOK_DOT
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+                i = i + 1
+                continue
+
+            # Arrow ->
+            if c == '-':
+                if source[i + 1] == '>':
+                    tokens[tok_count].type = TOK_ARROW
+                    tokens[tok_count].line = line
+                    tok_count = tok_count + 1
+                    i = i + 2
+                    continue
+
+            i = i + 1
+
+    # EOF
+    tokens[tok_count].type = TOK_EOF
+    tokens[tok_count].line = line
+    tok_count = tok_count + 1
+    return tok_count
+
+def tok_matches(source: ptr<u8>, start: i32, length: i32, word: ptr<u8>) -> i32:
+    let j: i32 = 0
+    while j < length:
+        if source[start + j] != word[j]:
+            return 0
+        j = j + 1
+    if word[j] != 0:
+        return 0
+    return 1
+
+def main() -> i32:
+    let source: ptr<u8> = "def main() -> i32:\n    let x: i32 = 5\n    return x\n"
+    let tokens: ptr<Token> = alloc(1000)
+    let indent_stack: ptr<i32> = alloc(100)
+    let length: i32 = 51
+    let count: i32 = tokenize(source, length, tokens, indent_stack)
+    print("Token count: ")
+    print(count)
+    print("\n")
+    let i: i32 = 0
+    while i < count:
+        print("Token type: ")
+        print(tokens[i].type)
+        print("\n")
+        i = i + 1
+    return 0

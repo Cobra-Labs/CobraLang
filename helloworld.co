@@ -1,9 +1,8 @@
 def main() -> i32:
-    let a: ptr<u8> = "hello"
-    let b: ptr<u8> = "hello"
-    let c: ptr<u8> = "world"
-    if streq(a, b):
-        print("a == b\n")
-    if streq(a, c):
-        print("a == c\n")
+    let i: i32 = 0
+    while i < 10:
+        if i == 5:
+            break
+        i = i + 1
+    print(i)
     return 0
