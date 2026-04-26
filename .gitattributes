@@ -1,3 +1,4 @@
 *.py linguist-vendored
 *.co linguist-language=Python
 *.co linguist-alias=Cobra
+*.html linguist-detectable=false
