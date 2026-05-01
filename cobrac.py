@@ -28,7 +28,7 @@ TOKEN_PATTERNS = [
     ("NUMBER",   r"0x[0-9a-fA-F]+|\d+"),
     ("CHAR", r"'\\?.'"),  # matched 'x' und '\n'
     ("IDENT",    r"[a-zA-Z_][a-zA-Z0-9_]*"),
-    ("OP",       r"[+\-*/<>=!&|]+"),
+    ("OP",       r"[+\-*/<>=!&|%]+"),
     ("COLON",    r":"),
     ("COMMA",    r","),
     ("LPAREN",   r"\("),
@@ -385,20 +385,16 @@ class Parser:
         return ReturnStmt(value)
 
     def parse_if(self):
-        print("parsing if")
         self.eat("KEYWORD", "if")
         condition = self.parse_expr()
-        print("expr parsed")
         self.eat("COLON")
         then_body = self.parse_block()
-        print("then_body: ", then_body)
 
         else_body = None
         if self.peek().type == "KEYWORD" and self.peek().value == "else":
             self.eat("KEYWORD", "else")
             self.eat("COLON")
             else_body = self.parse_block()
-        print("return")
         return IfStmt(condition, then_body, else_body)
 
     def parse_while(self):
@@ -436,7 +432,6 @@ class Parser:
 
     def parse_expr(self):
         left = self.parse_primary()
-        print("left: ", left)
 
         # Arithmetik/Vergleiche zuerst (höhere Priorität)
         while self.peek().type == "OP" and self.peek().value != "=":
@@ -471,7 +466,6 @@ class Parser:
 
     def parse_primary(self):
         tok = self.peek()
-        print(f"tok:  {tok}")
         # Klammern: (expr)
         if tok.type == "LPAREN":
             self.eat("LPAREN")
@@ -529,13 +523,7 @@ class Parser:
                     member = self.eat("IDENT").value
                     return MemberAccess(node, member)
                 return node
-            if self.peek().type == "OP":
-                left = tok
-                op = self.eat("OP").value
-                right = self.peek().value
-                self.eat("NUMBER")
-                print("operator!")
-                return BinOp(left, op, right)
+            return Ident(tok.value)
 
 
         raise SyntaxError(f"Zeile {tok.line}: Unerwartetes Token {tok.type} ({tok.value!r})")
@@ -568,6 +556,11 @@ class TypeChecker:
         self.structs = {}  # name → {field: type}
 
     def check(self):
+        # Globale lets in Scope laden
+        for node in self.tree.body:
+            if isinstance(node, LetStmt) and isinstance(node.value, Number):
+                self.scope[node.name] = node.type
+
         # Erst Structs registrieren
         for node in self.tree.body:
             if isinstance(node, StructDef):
@@ -727,6 +720,8 @@ class LLVMCodegen:
         self.struct_ids = {}
         self.loop_end_labels = []
         self.loop_cond_labels = []
+        self.global_consts = {}
+        self.entry_alloca_pos = 0
 
     def fresh(self) -> str:
         self.tmp += 1
@@ -740,6 +735,11 @@ class LLVMCodegen:
         for node in self.tree.body:
             if isinstance(node, StructDef):
                 self.gen_structdef(node)
+
+        for node in self.tree.body:
+            if isinstance(node, LetStmt) and isinstance(node.value, Number):
+                llty = self.cobra_type_to_llvm(node.type)
+                self.global_consts[node.name] = (str(node.value.value), llty)
 
         # Dann Funktionen
         for node in self.tree.body:
@@ -838,12 +838,16 @@ entry:
         mapping = {
             "i8": "i8", "i32": "i32", "i64": "i64",
             "u8": "i8", "u32": "i32", "u64": "i64",
-            "void": "void", "ptr<u8>": "i8*",
+            "bool": "i1", "void": "void",
+            "ptr<u8>": "i8*", "ptr<i32>": "i32*",
         }
         if t in mapping:
             return mapping[t]
-        # Struct-Typ
-        return f"%{t}*"
+        if t.startswith("ptr<"):
+            inner = t[4:-1]  # "Token", "i32", "u8" ...
+            inner_ll = mapping.get(inner, f"%{inner}")  # i32→i32, Token→%Token
+            return f"{inner_ll}*"  # → "i32*" oder "%Token*"
+        return f"%{t}*"  # reiner Struct-Name → "%Token*"
 
     def gen_funcdef(self, node: FuncDef):
         self.tmp = 0
@@ -860,6 +864,8 @@ entry:
             self.emit(f"  {ptr} = alloca {llty}")
             self.emit(f"  store {llty} %{pname}, {llty}* {ptr}")
             self.scope[pname] = (ptr, llty, True)
+
+        self.entry_alloca_pos = len(self.output)  # NEU: nach param-allocas
 
         for stmt in node.body:
             self.gen_stmt(stmt)
@@ -887,12 +893,22 @@ entry:
             self.gen_expr(node)
 
     def gen_let(self, node: LetStmt):
+        if isinstance(node.value, FuncCall) and node.value.name == "alloc":
+            llty = self.cobra_type_to_llvm(node.type)
+            reg, _ = self.gen_alloc(node.value, llty)
+            self.scope[node.name] = (reg, llty, False)
+            return
+
         reg, ty = self.gen_expr(node.value)
-        if ty.endswith("*"):  # Pointer direkt speichern
+        if ty.endswith("*"):
             self.scope[node.name] = (reg, ty, False)
             return
+
         ptr = self.fresh()
-        self.emit(f"  {ptr} = alloca {ty}")
+        # alloca in entry-Block einfügen statt hier
+        self.output.insert(self.entry_alloca_pos, f"  {ptr} = alloca {ty}")
+        self.entry_alloca_pos += 1  # weil wir eine Zeile eingefügt haben
+
         self.emit(f"  store {ty} {reg}, {ty}* {ptr}")
         self.scope[node.name] = (ptr, ty, True)
 
@@ -916,6 +932,9 @@ entry:
         if isinstance(node, MemberAccess):
             return self.gen_member_access(node)
         if isinstance(node, Ident):
+            if node.name in self.global_consts:
+                val, ty = self.global_consts[node.name]
+                return val, ty
             ptr, ty, is_ptr = self.scope[node.name]
             if is_ptr:
                 reg = self.fresh()
@@ -941,6 +960,22 @@ entry:
                     self.emit(f"  {gep_reg} = getelementptr i32, i32* {ptr_reg}, i32 {idx_reg}")
                     self.emit(f"  store i32 {reg}, i32* {gep_reg}")
                     return reg, ty
+                if isinstance(node.left, MemberAccess):
+                    # tokens[tok_count].type = val
+                    obj = node.left.obj  # IndexAccess(tokens, tok_count)
+                    member = node.left.member
+
+                    ptr_reg, ptr_type = self.gen_expr(obj)  # gibt %Token* zurück
+                    struct_name = ptr_type.lstrip("%").rstrip("*")
+                    fields = self.structs[struct_name]
+                    idx = next(i for i, (f, _) in enumerate(fields) if f == member)
+                    field_type = fields[idx][1]
+
+                    val_reg, val_ty = self.gen_expr(node.right)
+                    gep = self.fresh()
+                    self.emit(f"  {gep} = getelementptr %{struct_name}, %{struct_name}* {ptr_reg}, i32 0, i32 {idx}")
+                    self.emit(f"  store {field_type} {val_reg}, {field_type}* {gep}")
+                    return val_reg, val_ty
                 return reg, ty
 
             l_reg, l_ty = self.gen_expr(node.left)
@@ -1040,13 +1075,22 @@ entry:
 
     def gen_member_access(self, node: MemberAccess) -> tuple[str, str]:
         obj_reg, obj_type = self.gen_expr(node.obj)
+
         struct_name = obj_type.lstrip("%").rstrip("*")
+
+        if struct_name not in self.structs:
+            raise ValueError(f"Unbekannter Struct '{struct_name}' (typ: {obj_type})")
+
         fields = self.structs[struct_name]
         idx = next(i for i, (f, _) in enumerate(fields) if f == node.member)
         field_type = fields[idx][1]
         ptr_reg = self.fresh()
         val_reg = self.fresh()
-        self.emit(f"  {ptr_reg} = getelementptr %{struct_name}, %{struct_name}* {obj_reg}, i32 0, i32 {idx}")
+
+        struct_ptr_type = obj_type if obj_type.endswith("*") else f"{obj_type}*"
+        base_type = struct_ptr_type[:-1]  # "%Token"
+
+        self.emit(f"  {ptr_reg} = getelementptr {base_type}, {base_type}* {obj_reg}, i32 0, i32 {idx}")
         self.emit(f"  {val_reg} = load {field_type}, {field_type}* {ptr_reg}")
         return val_reg, field_type
 
@@ -1118,29 +1162,64 @@ entry:
 
         self.emit(f"{end_label}:")
 
-    def gen_alloc(self, node: FuncCall) -> tuple[str, str]:
+    def gen_alloc(self, node: FuncCall, target_type: str = "i32*") -> tuple[str, str]:
         count_reg, _ = self.gen_expr(node.args[0])
-        size_reg = self.fresh()
-        self.emit(f"  {size_reg} = mul i32 {count_reg}, 4")
+
+        # Elementgröße bestimmen
+        elem_type = target_type.rstrip("*")  # "%Token" oder "i32"
+        # Größe: für Structs nehmen wir 64 Bytes als konservative Schätzung
+        # Für i32 = 4 Bytes
+        if elem_type == "i32":
+            size_mul = 4
+            self.emit(f"  %_sz{self.tmp} = mul i32 {count_reg}, {size_mul}")
+        else:
+            # Struct: mit getelementptr Trick die Größe berechnen
+            size_reg = self.fresh()
+            self.emit(f"  {size_reg} = getelementptr {elem_type}, {elem_type}* null, i32 1")
+            sz_int = self.fresh()
+            self.emit(f"  {sz_int} = ptrtoint {elem_type}* {size_reg} to i64")
+            mul_reg = self.fresh()
+            count64 = self.fresh()
+            self.emit(f"  {count64} = sext i32 {count_reg} to i64")
+            self.emit(f"  {mul_reg} = mul i64 {sz_int}, {count64}")
+            ptr_raw = self.fresh()
+            constraints = "={ax},{ax},{di},{si},{dx},{r10},{r8},{r9},~{dirflag},~{fpsr},~{flags}"
+            self.emit(
+                f'  {ptr_raw} = call i64 asm sideeffect "syscall", "{constraints}"(i64 9, i64 0, i64 {mul_reg}, i64 3, i64 34, i64 -1, i64 0)')
+            cast_reg = self.fresh()
+            self.emit(f"  {cast_reg} = inttoptr i64 {ptr_raw} to {target_type}")
+            return cast_reg, target_type
+
+        # i32-Pfad (wie bisher)
+        size_reg = f"%_sz{self.tmp}"
         size64 = self.fresh()
         self.emit(f"  {size64} = sext i32 {size_reg} to i64")
-        ptr_reg = self.fresh()
+        ptr_raw = self.fresh()
         constraints = "={ax},{ax},{di},{si},{dx},{r10},{r8},{r9},~{dirflag},~{fpsr},~{flags}"
         self.emit(
-            f'  {ptr_reg} = call i64 asm sideeffect "syscall", "{constraints}"(i64 9, i64 0, i64 {size64}, i64 3, i64 34, i64 -1, i64 0)')
+            f'  {ptr_raw} = call i64 asm sideeffect "syscall", "{constraints}"(i64 9, i64 0, i64 {size64}, i64 3, i64 34, i64 -1, i64 0)')
         cast_reg = self.fresh()
-        self.emit(f"  {cast_reg} = inttoptr i64 {ptr_reg} to i32*")  # ← i32* statt i8*
+        self.emit(f"  {cast_reg} = inttoptr i64 {ptr_raw} to i32*")
         return cast_reg, "i32*"
 
     def gen_index_access(self, node: IndexAccess) -> tuple[str, str]:
         ptr_reg, ptr_type = self.gen_expr(node.obj)
         idx_reg, _ = self.gen_expr(node.index)
-        elem_type = "i32"
+
+        if ptr_type.endswith("*"):
+            elem_type = ptr_type[:-1]
+        else:
+            elem_type = "i32"
+
         gep_reg = self.fresh()
         self.emit(f"  {gep_reg} = getelementptr {elem_type}, {elem_type}* {ptr_reg}, i32 {idx_reg}")
+
+        if elem_type.startswith("%"):
+            return gep_reg, f"{elem_type}*"
+
         val_reg = self.fresh()
         self.emit(f"  {val_reg} = load {elem_type}, {elem_type}* {gep_reg}")
-        return (val_reg, elem_type)
+        return val_reg, elem_type
 
     def gen_streq(self, node: FuncCall) -> tuple[str, str]:
         a_reg, _ = self.gen_expr(node.args[0])
@@ -1279,7 +1358,10 @@ def main():
         log("\n=== LLVM IR ===")
         log(ir)
 
+
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"[!] Compiler Fehler: {e}")
         sys.exit(1)
 
