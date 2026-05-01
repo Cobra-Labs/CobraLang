@@ -385,17 +385,20 @@ class Parser:
         return ReturnStmt(value)
 
     def parse_if(self):
+        print("parsing if")
         self.eat("KEYWORD", "if")
         condition = self.parse_expr()
+        print("expr parsed")
         self.eat("COLON")
         then_body = self.parse_block()
+        print("then_body: ", then_body)
 
         else_body = None
         if self.peek().type == "KEYWORD" and self.peek().value == "else":
             self.eat("KEYWORD", "else")
             self.eat("COLON")
             else_body = self.parse_block()
-
+        print("return")
         return IfStmt(condition, then_body, else_body)
 
     def parse_while(self):
@@ -433,6 +436,7 @@ class Parser:
 
     def parse_expr(self):
         left = self.parse_primary()
+        print("left: ", left)
 
         # Arithmetik/Vergleiche zuerst (höhere Priorität)
         while self.peek().type == "OP" and self.peek().value != "=":
@@ -467,7 +471,7 @@ class Parser:
 
     def parse_primary(self):
         tok = self.peek()
-
+        print(f"tok:  {tok}")
         # Klammern: (expr)
         if tok.type == "LPAREN":
             self.eat("LPAREN")
@@ -525,6 +529,13 @@ class Parser:
                     member = self.eat("IDENT").value
                     return MemberAccess(node, member)
                 return node
+            if self.peek().type == "OP":
+                left = tok
+                op = self.eat("OP").value
+                right = self.peek().value
+                self.eat("NUMBER")
+                print("operator!")
+                return BinOp(left, op, right)
 
 
         raise SyntaxError(f"Zeile {tok.line}: Unerwartetes Token {tok.type} ({tok.value!r})")
