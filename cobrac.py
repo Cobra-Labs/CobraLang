@@ -1,10 +1,8 @@
 #!/usr/bin/python3
-import re
 import argparse
 import subprocess
 import os
 import sys
-
 import re
 
 DATATYPES = {
@@ -108,11 +106,14 @@ def tokenize(source: str) -> list[Token]:
                 elif value[2] == 't':
                     value = str(ord('\t'))
                 elif value[2] == '0':
+                    print("null")
                     value = str(0)
+                elif value[2] == 'x':
+                    print("hex")
+                    hex_val = value[3:5]
+                    value = str(int(hex_val, 16))
                 else:
                     value = str(ord(value[2]))
-            else:
-                value = str(ord(value[1]))
 
         # 3. INDENT / DEDENT am Zeilenanfang
         if at_line_start:
@@ -507,25 +508,21 @@ class Parser:
                 self.eat("RPAREN")
                 return FuncCall(tok.value, args)
             # Member access: tok.type
-            if self.peek().type == "DOT":
-                self.eat("DOT")
-                member = self.eat("IDENT").value
-                return MemberAccess(Ident(tok.value), member)
-            # Array index: arr[0]
-            if self.peek().type == "LBRACKET":
-                self.eat("LBRACKET")
-                index = self.parse_expr()
-                self.eat("RBRACKET")
-                node = IndexAccess(Ident(tok.value), index)
-                # Chained member access: arr[i].member
+            node = Ident(tok.value)
+
+            # Chaining: .member und [index] beliebig oft
+            while self.peek().type in ("DOT", "LBRACKET"):
                 if self.peek().type == "DOT":
                     self.eat("DOT")
                     member = self.eat("IDENT").value
-                    return MemberAccess(node, member)
-                return node
-            return Ident(tok.value)
+                    node = MemberAccess(node, member)
+                elif self.peek().type == "LBRACKET":
+                    self.eat("LBRACKET")
+                    index = self.parse_expr()
+                    self.eat("RBRACKET")
+                    node = IndexAccess(node, index)
 
-
+            return node
         raise SyntaxError(f"Zeile {tok.line}: Unerwartetes Token {tok.type} ({tok.value!r})")
 
 
@@ -536,6 +533,7 @@ BUILTINS = {
     "alloc",
     "streq",
     "isinstance",
+    "sleep",
 }
 
 # typechecker.py
@@ -553,10 +551,9 @@ class TypeChecker:
         self.tree = tree
         self.scope = {}
         self.funcs = {}
-        self.structs = {}  # name → {field: type}
+        self.structs = {}
 
     def check(self):
-        # Globale lets in Scope laden
         for node in self.tree.body:
             if isinstance(node, LetStmt) and isinstance(node.value, Number):
                 self.scope[node.name] = node.type
@@ -574,6 +571,8 @@ class TypeChecker:
         # Dann alles prüfen
         for node in self.tree.body:
             self.check_node(node)
+
+        print("Funcs:", list(self.funcs.keys()))
 
     def check_node(self, node):
         if isinstance(node, FuncDef):
@@ -683,9 +682,10 @@ class TypeChecker:
                 if node.name == "alloc": return "ptr<i32>"
                 if node.name == "streq": return "bool"
                 if node.name == "isinstance": return "bool"
+                if node.name == "sleep": return "void"
 
             if node.name not in self.funcs:
-                raise TypeError(f"Unbekannte Funktion '{node.name}'")
+                return "i32"
 
         if isinstance(node, StringLit):
             return "ptr<u8>"
@@ -699,8 +699,13 @@ class TypeChecker:
             left = self.infer_type(node.left)
             right = self.infer_type(node.right)
             int_types = {"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}
+            if node.op == "=":
+                return left  # Zuweisung immer OK
             if left != right:
                 if left in int_types and right in int_types:
+                    return left
+                # Pointer-Kompatibilität
+                if left.startswith("ptr<") and right.startswith("ptr<"):
                     return left
                 raise TypeError(f"Typ-Mismatch in BinOp: {left} {node.op} {right}")
             return left
@@ -837,9 +842,10 @@ entry:
             header.append(f"%{name} = type {{ {field_types} }}")
 
         for i, s in enumerate(self.strings):
-            fmt_s = s.replace("\\n", "\\0A").replace("\n", "\\0A")
-            length = len(s.replace("\\n", "n")) + 1
-            header.append(f'@str{i} = private constant [{length} x i8] c"{fmt_s}\\00"')
+            raw_s = s.encode('utf-8').decode('unicode_escape').encode('latin-1')
+            fmt_s = "".join(f"\\{b:02x}" for b in raw_s)
+            actual_length = len(raw_s) + 1
+            header.append(f'@str{i} = private constant [{actual_length} x i8] c"{fmt_s}\\00"')
 
         return "\n".join(header + [""] + self.output)
 
@@ -1004,7 +1010,7 @@ entry:
             return reg, result_type
         return None
 
-    def gen_call(self, node: FuncCall) -> tuple[str, str]:
+    def gen_call(self, node: FuncCall) -> tuple[str, str] | None:
         if node.name == "syscall":
             return self.gen_syscall(node)
         if node.name == "print":
@@ -1015,6 +1021,9 @@ entry:
             return self.gen_streq(node)
         if node.name == "isinstance":
             return self.gen_isinstance(node)
+        if node.name == "sleep":
+            ms_reg, _ = self.gen_expr(node.args[0])
+            return self.gen_sleep(ms_reg)
 
         args = [self.gen_expr(a) for a in node.args]
         args_ir = ", ".join(f"{t} {r}" for r, t in args)
@@ -1056,6 +1065,34 @@ entry:
         reg = self.fresh()
         self.emit(f'  {reg} = call i64 asm sideeffect "syscall", "{constraints}"({vals})')
         return reg, "i64"
+
+    def gen_sleep(self, ms_value_reg):
+        struct_ptr = self.fresh()
+        self.emit(f"  {struct_ptr} = alloca [2 x i64]")
+
+        sec = self.fresh()
+        self.emit(f"  {sec} = udiv i64 {ms_value_reg}, 1000")  # ms zu s
+
+        rem_ms = self.fresh()
+        self.emit(f"  {rem_ms} = urem i64 {ms_value_reg}, 1000")  # Restliche ms
+
+        nsec = self.fresh()
+        self.emit(f"  {nsec} = mul i64 {rem_ms}, 1000000")  # ms zu ns
+        p1 = self.fresh()
+        self.emit(f"  {p1} = getelementptr [2 x i64], [2 x i64]* {struct_ptr}, i32 0, i32 0")
+        self.emit(f"  store i64 {sec}, i64* {p1}")
+
+        p2 = self.fresh()
+        self.emit(f"  {p2} = getelementptr [2 x i64], [2 x i64]* {struct_ptr}, i32 0, i32 1")
+        self.emit(f"  store i64 {nsec}, i64* {p2}")
+        ptr_int = self.fresh()
+        self.emit(f"  {ptr_int} = ptrtoint [2 x i64]* {struct_ptr} to i64")
+
+
+        res = self.fresh()
+        constraints = "={ax},{ax},{di},{si},~{rcx},~{r11},~{flags}"
+        self.emit(f'  {res} = call i64 asm sideeffect "syscall", "{constraints}"(i64 35, i64 {ptr_int}, i64 0)')
+        return "0", "void"
 
     def gen_structdef(self, node: StructDef):
         type_id = len(self.structs) + 1
@@ -1236,12 +1273,11 @@ entry:
         b_reg, _ = self.gen_expr(node.args[1])
         reg = self.fresh()
         self.emit(f"  {reg} = call i1 @streq(i8* {a_reg}, i8* {b_reg})")
-        return (reg, "i1")
+        return reg, "i1"
 
     def gen_isinstance(self, node: FuncCall) -> tuple[str, str]:
         # isinstance(obj, TypeName)
         obj_reg, obj_type = self.gen_expr(node.args[0])
-        # zweites Argument ist ein Type-Name als IDENT — wir lesen den direkt
         type_name = node.args[1].name  # Ident Node
         type_id = self.struct_ids[type_name]
 
@@ -1304,25 +1340,34 @@ def resolve_imports(tree, source_dir, visited=None):
             module_file = os.path.join(source_dir, f"{node.module}.co")
             if not os.path.exists(module_file):
                 raise FileNotFoundError(f"Modul '{node.module}' nicht gefunden: {module_file}")
-            if module_file in visited:
+
+            # Bei symbol-imports (from x import y) immer laden
+            # Bei wildcard-imports (import x) visited prüfen
+            if not node.symbols and module_file in visited:
                 continue
-            visited.add(module_file)
+
+            if not node.symbols:
+                visited.add(module_file)
 
             with open(module_file, "r") as f:
                 mod_source = f.read()
             mod_tokens = tokenize(mod_source)
-            mod_tree   = Parser(mod_tokens).parse()
-            mod_tree   = resolve_imports(mod_tree, source_dir, visited)
+            mod_tree = Parser(mod_tokens).parse()
+            mod_tree = resolve_imports(mod_tree, source_dir, visited)
 
             if node.symbols:
                 for n in mod_tree.body:
-                    if isinstance(n, (FuncDef, StructDef)) and n.name in node.symbols:
-                        new_body.append(n)
+                    if isinstance(n, LetStmt) and isinstance(n.value, Number):
+                        if n.name not in [x.name for x in new_body if isinstance(x, LetStmt)]:
+                            new_body.append(n)
+                    if isinstance(n, (StructDef, FuncDef)):
+                        existing_names = [x.name for x in new_body if isinstance(x, (StructDef, FuncDef))]
+                        if n.name not in existing_names and n.name != "main":
+                            new_body.append(n)
             else:
                 new_body.extend(mod_tree.body)
         else:
             new_body.append(node)
-
     return Program(new_body)
 
 
@@ -1403,7 +1448,7 @@ def main():
     except subprocess.CalledProcessError as e:
         print(f"[!] Toolchain Fehler: {e}")
     finally:
-        if os.path.exists(ll_file): os.remove(ll_file)
+        # if os.path.exists(ll_file): os.remove(ll_file)
         if os.path.exists(obj_file): os.remove(obj_file)
 
 

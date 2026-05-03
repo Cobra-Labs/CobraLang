@@ -28,19 +28,23 @@ struct Parser:
     node_count: i32
 
 def main() -> i32:
+    let source: ptr<u8> = "def main() -> i32:\n    return 0\n"
+    let tokens: ptr<Token> = alloc(1000)
+    let indent_stack: ptr<i32> = alloc(100)
+    let count: i32 = tokenize(source, 33, tokens, indent_stack)
     let p: ptr<Parser> = alloc(1)
+    p.tokens = tokens
     p.pos = 0
-    p.count = 0
+    p.count = count
+    p.nodes = alloc(1000)
     p.node_count = 0
-    let result: i32 = test(p)
-    print(result)
+    let root: i32 = parse_program(p)
+    print("Nodes: ")
+    print(p.node_count)
     print("\n")
     return 0
 
-def test(p: ptr<Parser>) -> i32:
-    return p.pos
-
-def parser_peek() -> i32:
+def parser_peek(p: ptr<Parser>) -> i32:
     return p.tokens[p.pos].type
 
 def parser_eat(p: ptr<Parser>) -> i32:
@@ -57,3 +61,12 @@ def parser_new_node(p: ptr<Parser>, kind: i32) -> i32:
     p.nodes[idx].d = 0
     p.node_count = p.node_count + 1
     return idx
+
+def parse_program(p: ptr<Parser>) -> i32:
+    let root: i32 = parser_new_node(p, NODE_PROGRAM)
+    while parser_peek(p) != TOK_EOF:
+        let stmt: i32 = parse_stmt(p)
+    return root
+
+def parse_stmt(p: ptr<Parser>) -> i32:
+    return 0
