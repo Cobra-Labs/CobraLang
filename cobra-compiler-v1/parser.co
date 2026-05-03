@@ -2,5 +2,58 @@ from lexer import Token
 from lexer import tokenize
 from lexer import tok_matches
 
+let NODE_PROGRAM: i32 = 1
+let NODE_FUNCDEF: i32 = 2
+let NODE_LET: i32 = 3
+let NODE_RETURN: i32 = 4
+let NODE_IF: i32 = 5
+let NODE_WHILE: i32 = 6
+let NODE_BINOP: i32 = 7
+let NODE_IDENT: i32 = 8
+let NODE_NUMBER: i32 = 9
+let NODE_FUNCCALL: i32 = 10
+
+struct ASTNode:
+    kind: i32
+    a: i32   # left / value / name-token
+    b: i32   # right / param-count
+    c: i32   # op-token / body-start
+    d: i32   # body-end / next
+
+struct Parser:
+    tokens: ptr<Token>
+    pos: i32
+    count: i32
+    nodes: ptr<ASTNode>
+    node_count: i32
+
 def main() -> i32:
+    let p: ptr<Parser> = alloc(1)
+    p.pos = 0
+    p.count = 0
+    p.node_count = 0
+    let result: i32 = test(p)
+    print(result)
+    print("\n")
     return 0
+
+def test(p: ptr<Parser>) -> i32:
+    return p.pos
+
+def parser_peek() -> i32:
+    return p.tokens[p.pos].type
+
+def parser_eat(p: ptr<Parser>) -> i32:
+    let idx: i32 = p.pos
+    p.pos = p.pos + 1
+    return idx
+
+def parser_new_node(p: ptr<Parser>, kind: i32) -> i32:
+    let idx: i32 = p.node_count
+    p.nodes[idx].kind = kind
+    p.nodes[idx].a = 0
+    p.nodes[idx].b = 0
+    p.nodes[idx].c = 0
+    p.nodes[idx].d = 0
+    p.node_count = p.node_count + 1
+    return idx

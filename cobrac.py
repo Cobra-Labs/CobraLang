@@ -616,9 +616,16 @@ class TypeChecker:
         if isinstance(node.value, FuncCall) and node.value.name == "alloc":
             self.scope[node.name] = node.type
             return
-        if value_type != node.type and node.type not in self.structs:
+
+        # ptr<Struct> erlauben
+        declared = node.type
+        if declared.startswith("ptr<"):
+            self.scope[node.name] = node.type
+            return
+
+        if value_type != declared and declared not in self.structs:
             raise TypeError(
-                f"Typ-Mismatch: '{node.name}' ist {node.type}, aber Wert ist {value_type}",
+                f"Typ-Mismatch: '{node.name}' ist {declared}, aber Wert ist {value_type}",
                 line=0
             )
         self.scope[node.name] = node.type
@@ -658,11 +665,14 @@ class TypeChecker:
 
         if isinstance(node, MemberAccess):
             obj_type = self.infer_type(node.obj)
-            if obj_type not in self.structs:
+            struct_name = obj_type
+            if struct_name.startswith("ptr<"):
+                struct_name = struct_name[4:-1]
+            if struct_name not in self.structs:
                 raise TypeError(f"'{obj_type}' ist kein Struct")
-            fields = self.structs[obj_type]
+            fields = self.structs[struct_name]
             if node.member not in fields:
-                raise TypeError(f"Struct '{obj_type}' hat kein Feld '{node.member}'")
+                raise TypeError(f"Struct '{struct_name}' hat kein Feld '{node.member}'")
             return fields[node.member]
 
         if isinstance(node, FuncCall):
@@ -1360,8 +1370,9 @@ def main():
 
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
         print(f"[!] Compiler Fehler: {e}")
         sys.exit(1)
 
