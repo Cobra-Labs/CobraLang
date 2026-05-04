@@ -574,8 +574,6 @@ class TypeChecker:
         for node in self.tree.body:
             self.check_node(node)
 
-        print("Funcs:", list(self.funcs.keys()))
-
     def check_node(self, node):
         if isinstance(node, FuncDef):
             self.check_funcdef(node)
@@ -1380,6 +1378,7 @@ def main():
     arg_parser.add_argument("-s", "--asm", action="store_true")
     arg_parser.add_argument("-x", "--hex", action="store_true")
     arg_parser.add_argument("-v", "--verbose", action="store_true")
+    arg_parser.add_argument("-l", "--llvm", action="store_true")
     args = arg_parser.parse_args()
 
     def log(msg):
@@ -1387,32 +1386,32 @@ def main():
             print(msg)
 
     if not os.path.exists(args.input):
-        print(f"Fehler: Datei '{args.input}' nicht gefunden.")
+        print(f"\x1b[1m\x1b[31mFehler: Datei '{args.input}' nicht gefunden.\x1b[0m")
         sys.exit(1)
 
     with open(args.input, "r") as f:
         source = f.read()
 
-    print(f"[*] Kompiliere {args.input}...")
+    print(f"\x1b[32m\x1b[1m[*] Kompiliere {args.input}...\x1b[0m")
 
     try:
         tokens = tokenize(source)
-        log("\n=== TOKENS ===")
+        log("\n\x1b[32m\x1b[1m=== TOKENS ===\x1b[0m")
         for tok in tokens:
             log(f"  {tok}")
 
         tree = Parser(tokens).parse()
-        log("\n=== AST ===")
+        log("\n\x1b[32m\x1b[1m=== AST ===\x1b[0m")
         for node in tree.body:
             log(f"  {node}")
 
         tree = resolve_imports(tree, os.path.dirname(os.path.abspath(args.input)))
 
         TypeChecker(tree).check()
-        log("\n=== TYPCHECK OK ===")
+        log("\n\x1b[32m\x1b[1m=== TYPCHECK OK ===\x1b[0m")
 
         ir = LLVMCodegen(tree).generate()
-        log("\n=== LLVM IR ===")
+        log("\n\x1b[32m\x1b[1m=== LLVM IR ===\x1b[0m")
         log(ir)
 
 
@@ -1420,7 +1419,7 @@ def main():
         if args.verbose:
             import traceback
             traceback.print_exc()
-        print(f"[!] Compiler Fehler: {e}")
+        print(f"\x1b[1m\x1b[31m[!] Compiler Fehler: {e}\x1b[0m")
         sys.exit(1)
 
     base_name = args.input.rsplit(".", 1)[0]
@@ -1428,29 +1427,32 @@ def main():
     obj_file = f"{base_name}.o"
     asm_file = f"{base_name}.s"
 
+    print("\x1b[32m\x1b[1m[+] Generieren des LLVM IR...\x1b[0m")
     with open(ll_file, "w") as f:
         f.write(ir)
+    print("\x1b[32m\x1b[1m[+] LLVM IR problemlos generiert!\x1b[0m")
+
 
     try:
         log("\n=== TOOLCHAIN ===")
         subprocess.run(["llc", "-filetype=obj", "-relocation-model=static", ll_file, "-o", obj_file], check=True)
-        log(f"[+] Object File: {obj_file}")
+        log(f"\x1b[32m\x1b[1m[+] Object File: {obj_file}\x1b[0m")
 
         if args.asm:
             subprocess.run(["llc", "-filetype=asm", "-relocation-model=static", ll_file, "-o", asm_file], check=True)
-            print(f"[+] Assembly gespeichert in {asm_file}")
+            print(f"\x1b[32m\x1b[1m[+] Assembly gespeichert in {asm_file}\x1b[0m")
 
         subprocess.run(["ld", "-static", obj_file, "-o", args.output], check=True)
-        print(f"[+] Binary erzeugt: {args.output}")
+        print(f"\x1b[32m\x1b[1m[+] Binary erzeugt: {args.output}\x1b[0m")
 
         if args.hex:
-            print(f"[*] Hexdump von {args.output}:")
+            print(f"\x1b[32m\x1b[1m[*] Hexdump von {args.output}:\x1b[0m")
             subprocess.run(["hexdump", "-C", args.output])
 
     except subprocess.CalledProcessError as e:
-        print(f"[!] Toolchain Fehler: {e}")
+        print(f"\x1b[1m\x1b[31m[!] Toolchain Fehler: {e}\x1b[0m")
     finally:
-        # if os.path.exists(ll_file): os.remove(ll_file)
+        if os.path.exists(ll_file) and not args.llvm: os.remove(ll_file)
         if os.path.exists(obj_file): os.remove(obj_file)
 
 
