@@ -16,3 +16,4 @@ ENV/
 *.s
 *.o
 *.out
+cobra-plugin/

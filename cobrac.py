@@ -114,8 +114,10 @@ def tokenize(source: str) -> list[Token]:
                     value = str(int(hex_val, 16))
                 else:
                     value = str(ord(value[2]))
+            else:
+                value = str(ord(value[1]))
 
-        # 3. INDENT / DEDENT am Zeilenanfang
+                # 3. INDENT / DEDENT am Zeilenanfang
         if at_line_start:
             at_line_start = False
             indent = col
