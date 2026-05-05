@@ -84,7 +84,8 @@ def cg_print_int(n: i32) -> i32:
 	if n > 9:
 		cg_print_int(n / 10)
 	let digit: i32 = n % 10
-	let c: u8 = digit + 48
+    digit = digit + 48
+	let c: u8 = type(digit, "i32", "u8")
 	cg_putc(c)
 	return 0
 
@@ -112,7 +113,7 @@ def cg_find_struct(cg: ptr<Codegen>, name_tok: i32) -> i32:
 		if cg.struct_names[i] == name_tok:
 			return i
 		i = i + 1
-	return -1
+	return NODE_NEG
 
 def cg_tok_eq(cg: ptr<Codegen>, a: i32, b: i32) -> i32:
 	let src: ptr<u8> = cg.p.source
@@ -139,7 +140,7 @@ def cg_find_field(cg: ptr<Codegen>, struct_idx: i32, name_tok: i32) -> i32:
 		if cg_tok_eq(cg, cg.field_names[start + i], name_tok) == 1:
 			return start + i
 		i = i + 1
-	return -1
+	return NODE_NEG
 
 # ===== Scope =====
 
@@ -163,7 +164,7 @@ def cg_scope_get_reg(cg: ptr<Codegen>, name_tok: i32) -> i32:
 		if cg_tok_eq(cg, cg.scope_names[i], name_tok) == 1:
 			return cg.scope_regs[i]
 		i = i + 1
-	return -1
+	return NODE_NEG
 
 def cg_scope_get_ptr(cg: ptr<Codegen>, name_tok: i32) -> i32:
 	let i: i32 = 0
@@ -411,7 +412,7 @@ def cg_gen_expr(cg: ptr<Codegen>, node_idx: i32) -> i32:
 	if kind == NODE_INDEX:
 		return cg_gen_index(cg, node_idx)
 
-	return -1
+	return NODE_NEG
 
 def cg_gen_binop(cg: ptr<Codegen>, node_idx: i32) -> i32:
 	let n: ptr<ASTNode> = cg.p.nodes
@@ -570,7 +571,7 @@ def cg_gen_call(cg: ptr<Codegen>, node_idx: i32) -> i32:
 		print("  call void @__cobra_print_int(i32 %t")
 		cg_print_int(arg_reg)
 		print(")\n")
-		return -1
+		return NODE_NEG
 
 	# syscall builtin
 	if cg_tok_eq_str(cg, name_tok, "syscall") == 1:
@@ -1032,7 +1033,7 @@ def cg_gen_funcdef(cg: ptr<Codegen>, node_idx: i32) -> i32:
 
 # ===== Haupt-Codegen =====
 
-def codegen(p: ptr<Parser>) -> i32:
+def codegen(p: ptr<Parser>, root: i32) -> i32:
 	let cg: ptr<Codegen> = alloc(1)
 	cg.p = p
 	cg.tmp = 0
@@ -1054,9 +1055,8 @@ def codegen(p: ptr<Parser>) -> i32:
 	cg.scope_is_ptr = alloc(512)
 	cg.scope_count = 0
 
-	let root: i32 = p.body[0].node
 	let body_start: i32 = p.nodes[root].b
-	let body_count: i32 = p.nodes[root].c
+    let body_count: i32 = p.nodes[root].c
 
 	# 1. Structs registrieren
 	let i: i32 = 0
@@ -1085,13 +1085,16 @@ def codegen(p: ptr<Parser>) -> i32:
 # ===== main =====
 
 def main() -> i32:
-	let source: ptr<u8> = "def add(a: i32, b: i32) -> i32:\n    return a\ndef main() -> i32:\n    let x: i32 = add(1, 2)\n    print(x)\n    print(\"\n\")\n    return 0\n"
+	let raw: ptr<u8> = "def main() -> i32:\n    return 42\n"
+    let source: ptr<u8> = alloc(256)
+    let length: i32 = unescape(raw, source, 33)
 	let tokens: ptr<Token> = alloc(2048)
 	let indent_stack: ptr<i32> = alloc(64)
-	let length: i32 = 96
-
-	let tok_count: i32 = tokenize(source, length, tokens, indent_stack)
-
+    print(length)
+    print("\n")
+    let tok_count: i32 = tokenize(source, length, tokens, indent_stack)
+    print(tok_count)
+    print("\n")
 	let p: ptr<Parser> = alloc(1)
 	p.tokens = tokens
 	p.source = source
@@ -1108,8 +1111,15 @@ def main() -> i32:
 
 	let root: i32 = parse_program(p)
 
-	# Root in body[0] speichern damit codegen es findet
-	p.body[0].node = root
+    print(p.body[1].node)  # sollte FUNCDEF sein
+    print(p.nodes[p.body[1].node].kind)
+    print(p.nodes[p.body[1].node].a)
 
-	codegen(p)
+    print(p.nodes[root].b)
+    print("\n")
+
+    print(p.nodes[root].c)
+    print("\n")
+
+	codegen(p, root)
 	return 0

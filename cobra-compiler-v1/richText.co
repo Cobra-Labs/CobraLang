@@ -124,10 +124,8 @@ def clear() -> i32:
     print("\033[2J")
     return 0
 
-def cg_putc(c: u8) -> i32:
-    let buf: ptr<u8> = alloc(1)
-    buf[0] = c
-    syscall(1, 1, buf, 1)
+def cg_putc(c: ptr<u8>) -> i32:
+    syscall(1, 1, c, 1)
     return 0
 
 def main() -> i32:

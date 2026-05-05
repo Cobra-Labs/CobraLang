@@ -300,6 +300,25 @@ def tok_matches(source: ptr<u8>, start: i32, length: i32, word: ptr<u8>) -> i32:
 		return 0
 	return 1
 
+def unescape(src: ptr<u8>, dst: ptr<u8>, len: i32) -> i32:
+    let i: i32 = 0
+    let j: i32 = 0
+    while i < len:
+        if src[i] == '\\':
+            i = i + 1
+            if src[i] == 'n':
+                dst[j] = 10
+            if src[i] == 't':
+                dst[j] = 9
+            if src[i] == '0':
+                dst[j] = 0
+        else:
+            dst[j] = src[i]
+        i = i + 1
+        j = j + 1
+    dst[j] = 0
+    return j
+
 def main() -> i32:
 	let source: ptr<u8> = "def main() -> i32:\n    let x: i32 = 5\n    return x\n"
 	let tokens: ptr<Token> = alloc(1000)
