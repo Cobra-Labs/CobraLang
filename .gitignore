@@ -17,3 +17,4 @@ ENV/
 *.o
 *.out
 cobra-plugin/
+.aider*

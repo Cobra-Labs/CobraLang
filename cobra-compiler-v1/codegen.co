@@ -1,0 +1,1115 @@
+from lexer import Token
+from lexer import tokenize
+from lexer import tok_matches
+from parser import ASTNode
+from parser import Param
+from parser import Field
+from parser import BodyEntry
+from parser import Parser
+from parser import parse_program
+from richText import cg_putc
+
+# Node kinds
+let NODE_PROGRAM: i32 = 1
+let NODE_FUNCDEF: i32 = 2
+let NODE_LET: i32 = 3
+let NODE_RETURN: i32 = 4
+let NODE_IF: i32 = 5
+let NODE_WHILE: i32 = 6
+let NODE_BINOP: i32 = 7
+let NODE_IDENT: i32 = 8
+let NODE_NUMBER: i32 = 9
+let NODE_FUNCCALL: i32 = 10
+let NODE_STRUCT: i32 = 11
+let NODE_MEMBER: i32 = 12
+let NODE_INDEX: i32 = 13
+let NODE_STRING: i32 = 14
+let NODE_FOR: i32 = 15
+let NODE_BREAK: i32 = 16
+let NODE_CONTINUE: i32 = 17
+let NODE_STRUCTLIT: i32 = 18
+let NODE_ASSIGN: i32 = 19
+let NODE_NEG: i32 = 20
+
+# ===== Struct-Info =====
+# Da wir keinen Hash-Map haben, nutzen wir parallele Arrays:
+# struct_names[i] = name-tok-idx
+# struct_field_start[i] = erster Eintrag in field_names/field_types
+# struct_field_count[i] = anzahl felder
+# field_names[j] = name-tok-idx
+# field_types[j] = typ-string-idx (in type_strings)
+
+struct Codegen:
+	p: ptr<Parser>
+	tmp: i32
+	label_count: i32
+	# Struct-Registry
+	struct_names: ptr<i32>
+	struct_field_start: ptr<i32>
+	struct_field_count: ptr<i32>
+	struct_count: i32
+	# Felder aller Structs (flat)
+	field_names: ptr<i32>
+	field_types: ptr<i32>
+	field_count: i32
+	# String-Literale (global)
+	string_toks: ptr<i32>
+	string_count: i32
+	# Loop-Stack
+	loop_cond: ptr<i32>
+	loop_end: ptr<i32>
+	loop_depth: i32
+	# Scope: parallel arrays
+	scope_names: ptr<i32>
+	scope_regs: ptr<i32>
+	scope_is_ptr: ptr<i32>
+	scope_count: i32
+
+# ===== Output Helpers =====
+
+def cg_print_tok(cg: ptr<Codegen>, tok_idx: i32) -> i32:
+	let src: ptr<u8> = cg.p.source
+	let start: i32 = cg.p.tokens[tok_idx].start
+	let len: i32 = cg.p.tokens[tok_idx].length
+	let i: i32 = 0
+	while i < len:
+		cg_putc(src[start + i])
+		i = i + 1
+	return 0
+
+def cg_print_int(n: i32) -> i32:
+	if n < 0:
+		cg_putc('-')
+		n = 0 - n
+	if n > 9:
+		cg_print_int(n / 10)
+	let digit: i32 = n % 10
+	let c: u8 = digit + 48
+	cg_putc(c)
+	return 0
+
+def cg_fresh(cg: ptr<Codegen>) -> i32:
+	let t: i32 = cg.tmp
+	cg.tmp = cg.tmp + 1
+	return t
+
+def cg_fresh_label(cg: ptr<Codegen>) -> i32:
+	let l: i32 = cg.label_count
+	cg.label_count = cg.label_count + 1
+	return l
+
+# Gibt "%tN" aus
+def cg_emit_reg(cg: ptr<Codegen>, n: i32) -> i32:
+	print("%t")
+	cg_print_int(n)
+	return 0
+
+# ===== Struct Registry =====
+
+def cg_find_struct(cg: ptr<Codegen>, name_tok: i32) -> i32:
+	let i: i32 = 0
+	while i < cg.struct_count:
+		if cg.struct_names[i] == name_tok:
+			return i
+		i = i + 1
+	return -1
+
+def cg_tok_eq(cg: ptr<Codegen>, a: i32, b: i32) -> i32:
+	let src: ptr<u8> = cg.p.source
+	let la: i32 = cg.p.tokens[a].length
+	let lb: i32 = cg.p.tokens[b].length
+	if la != lb:
+		return 0
+	let i: i32 = 0
+	while i < la:
+		if src[cg.p.tokens[a].start + i] != src[cg.p.tokens[b].start + i]:
+			return 0
+		i = i + 1
+	return 1
+
+def cg_tok_eq_str(cg: ptr<Codegen>, tok: i32, word: ptr<u8>) -> i32:
+	return tok_matches(cg.p.source, cg.p.tokens[tok].start, cg.p.tokens[tok].length, word)
+
+# Findet Feld-Index in einem Struct (gibt globalen field-Index zurück)
+def cg_find_field(cg: ptr<Codegen>, struct_idx: i32, name_tok: i32) -> i32:
+	let start: i32 = cg.struct_field_start[struct_idx]
+	let count: i32 = cg.struct_field_count[struct_idx]
+	let i: i32 = 0
+	while i < count:
+		if cg_tok_eq(cg, cg.field_names[start + i], name_tok) == 1:
+			return start + i
+		i = i + 1
+	return -1
+
+# ===== Scope =====
+
+def cg_scope_set(cg: ptr<Codegen>, name_tok: i32, reg: i32, is_ptr: i32) -> i32:
+	let i: i32 = 0
+	while i < cg.scope_count:
+		if cg_tok_eq(cg, cg.scope_names[i], name_tok) == 1:
+			cg.scope_regs[i] = reg
+			cg.scope_is_ptr[i] = is_ptr
+			return 0
+		i = i + 1
+	cg.scope_names[cg.scope_count] = name_tok
+	cg.scope_regs[cg.scope_count] = reg
+	cg.scope_is_ptr[cg.scope_count] = is_ptr
+	cg.scope_count = cg.scope_count + 1
+	return 0
+
+def cg_scope_get_reg(cg: ptr<Codegen>, name_tok: i32) -> i32:
+	let i: i32 = 0
+	while i < cg.scope_count:
+		if cg_tok_eq(cg, cg.scope_names[i], name_tok) == 1:
+			return cg.scope_regs[i]
+		i = i + 1
+	return -1
+
+def cg_scope_get_ptr(cg: ptr<Codegen>, name_tok: i32) -> i32:
+	let i: i32 = 0
+	while i < cg.scope_count:
+		if cg_tok_eq(cg, cg.scope_names[i], name_tok) == 1:
+			return cg.scope_is_ptr[i]
+		i = i + 1
+	return 0
+
+# ===== Typ-Emission =====
+# Gibt LLVM-Typ für einen Token aus (i32, i8*, %Foo*, ...)
+
+def cg_emit_type_tok(cg: ptr<Codegen>, tok: i32, is_ptr: i32, inner_tok: i32) -> i32:
+	if is_ptr == 1:
+		# ptr<X>
+		if cg_tok_eq_str(cg, inner_tok, "u8") == 1:
+			print("i8*")
+			return 0
+		if cg_tok_eq_str(cg, inner_tok, "i32") == 1:
+			print("i32*")
+			return 0
+		if cg_tok_eq_str(cg, inner_tok, "i64") == 1:
+			print("i64*")
+			return 0
+		# Struct-Pointer
+		print("%")
+		cg_print_tok(cg, inner_tok)
+		print("*")
+		return 0
+	# Basis-Typ
+	if cg_tok_eq_str(cg, tok, "i32") == 1:
+		print("i32")
+		return 0
+	if cg_tok_eq_str(cg, tok, "i64") == 1:
+		print("i64")
+		return 0
+	if cg_tok_eq_str(cg, tok, "u8") == 1:
+		print("i8")
+		return 0
+	if cg_tok_eq_str(cg, tok, "bool") == 1:
+		print("i1")
+		return 0
+	if cg_tok_eq_str(cg, tok, "void") == 1:
+		print("void")
+		return 0
+	# Struct (IDENT als Typ)
+	print("%")
+	cg_print_tok(cg, tok)
+	print("*")
+	return 0
+
+# ===== Struct-Definitionen ausgeben =====
+
+def cg_emit_struct_defs(cg: ptr<Codegen>) -> i32:
+	let si: i32 = 0
+	while si < cg.struct_count:
+		print("%")
+		cg_print_tok(cg, cg.struct_names[si])
+		print(" = type { i32")		# i32 = isinstance-tag
+		let fi: i32 = cg.struct_field_start[si]
+		let fc: i32 = cg.struct_field_count[si]
+		let i: i32 = 0
+		while i < fc:
+			print(", ")
+			let ft: i32 = cg.field_types[fi + i]
+			let fip: i32 = cg.field_types[fi + i + 1]
+			let fin: i32 = cg.field_types[fi + i + 2]
+			cg_emit_type_tok(cg, ft, fip, fin)
+			i = i + 3
+		print(" }\n")
+		si = si + 1
+	return 0
+
+# ===== NODE_STRUCT registrieren =====
+
+def cg_register_struct(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let name_tok: i32 = n[node_idx].a
+	let field_start: i32 = n[node_idx].b
+	let field_count: i32 = n[node_idx].c
+
+	let si: i32 = cg.struct_count
+	cg.struct_names[si] = name_tok
+	cg.struct_field_start[si] = cg.field_count
+	cg.struct_field_count[si] = field_count
+	cg.struct_count = cg.struct_count + 1
+
+	let i: i32 = 0
+	while i < field_count:
+		let f: ptr<Field> = cg.p.fields
+		let fi: i32 = field_start + i
+		# Wir speichern: type_tok, type_is_ptr, inner_tok (3 slots pro Feld)
+		cg.field_names[cg.field_count] = f[fi].name_tok
+		cg.field_types[cg.field_count] = f[fi].type_tok
+		cg.field_count = cg.field_count + 1
+		cg.field_names[cg.field_count] = f[fi].type_is_ptr
+		cg.field_count = cg.field_count + 1
+		cg.field_names[cg.field_count] = f[fi].inner_tok
+		cg.field_count = cg.field_count + 1
+		i = i + 1
+	return si
+
+# ===== Builtins Header =====
+
+def cg_emit_builtins(cg: ptr<Codegen>) -> i32:
+	print("define void @__cobra_print_int(i32 %n) {\n")
+	print("entry:\n")
+	print("  %is_neg = icmp slt i32 %n, 0\n")
+	print("  br i1 %is_neg, label %neg, label %pos\n")
+	print("neg:\n")
+	print("  %minus = alloca [1 x i8]\n")
+	print("  %mp = getelementptr [1 x i8], [1 x i8]* %minus, i32 0, i32 0\n")
+	print("  store i8 45, i8* %mp\n")
+	print("  call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{dirflag},~{fpsr},~{flags}\"(i64 1, i64 1, i8* %mp, i64 1)\n")
+	print("  %pos_n = sub i32 0, %n\n")
+	print("  call void @__cobra_print_int(i32 %pos_n)\n")
+	print("  br label %end\n")
+	print("pos:\n")
+	print("  %gt9 = icmp sgt i32 %n, 9\n")
+	print("  br i1 %gt9, label %recurse, label %digit\n")
+	print("recurse:\n")
+	print("  %div = sdiv i32 %n, 10\n")
+	print("  call void @__cobra_print_int(i32 %div)\n")
+	print("  br label %digit\n")
+	print("digit:\n")
+	print("  %mod = srem i32 %n, 10\n")
+	print("  %ch = add i32 %mod, 48\n")
+	print("  %buf = alloca [1 x i8]\n")
+	print("  %bp = getelementptr [1 x i8], [1 x i8]* %buf, i32 0, i32 0\n")
+	print("  %ch8 = trunc i32 %ch to i8\n")
+	print("  store i8 %ch8, i8* %bp\n")
+	print("  call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{dirflag},~{fpsr},~{flags}\"(i64 1, i64 1, i8* %bp, i64 1)\n")
+	print("  br label %end\n")
+	print("end:\n")
+	print("  ret void\n")
+	print("}\n\n")
+
+	print("define i64 @strlen(i8* %s) {\n")
+	print("entry:\n  br label %loop\n")
+	print("loop:\n")
+	print("  %i = phi i64 [ 0, %entry ], [ %i1, %loop ]\n")
+	print("  %p = getelementptr i8, i8* %s, i64 %i\n")
+	print("  %c = load i8, i8* %p\n")
+	print("  %done = icmp eq i8 %c, 0\n")
+	print("  %i1 = add i64 %i, 1\n")
+	print("  br i1 %done, label %end, label %loop\n")
+	print("end:\n  ret i64 %i\n}\n\n")
+
+	print("define i1 @streq(i8* %a, i8* %b) {\n")
+	print("entry:\n  br label %loop\n")
+	print("loop:\n")
+	print("  %i = phi i64 [ 0, %entry ], [ %i1, %loop_next ]\n")
+	print("  %pa = getelementptr i8, i8* %a, i64 %i\n")
+	print("  %pb = getelementptr i8, i8* %b, i64 %i\n")
+	print("  %ca = load i8, i8* %pa\n")
+	print("  %cb = load i8, i8* %pb\n")
+	print("  %eq = icmp eq i8 %ca, %cb\n")
+	print("  %nul = icmp eq i8 %ca, 0\n")
+	print("  %i1 = add i64 %i, 1\n")
+	print("  br i1 %nul, label %done_eq, label %loop_next\n")
+	print("loop_next:\n")
+	print("  br i1 %eq, label %loop, label %done_neq\n")
+	print("done_eq:\n  ret i1 1\n")
+	print("done_neq:\n  ret i1 0\n}\n\n")
+	return 0
+
+def cg_emit_start(cg: ptr<Codegen>) -> i32:
+	print("define void @_start() {\n")
+	print("entry:\n")
+	print("  %ret = call i32 @main()\n")
+	print("  %ret64 = sext i32 %ret to i64\n")
+	print("  call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},~{dirflag},~{fpsr},~{flags}\"(i64 60, i64 %ret64)\n")
+	print("  ret void\n")
+	print("}\n")
+	return 0
+
+# ===== Codegen Expressions =====
+# Gibt Register-Nummer zurück (in %tN form)
+# -1 = void/kein Wert
+
+def cg_gen_expr(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let kind: i32 = n[node_idx].kind
+
+	if kind == NODE_NUMBER:
+		let t: i32 = cg_fresh(cg)
+		let tok: i32 = n[node_idx].a
+		print("  %t")
+		cg_print_int(t)
+		print(" = add i32 0, ")
+		cg_print_tok(cg, tok)
+		print("\n")
+		return t
+
+	if kind == NODE_NEG:
+		let inner: i32 = cg_gen_expr(cg, n[node_idx].a)
+		let t: i32 = cg_fresh(cg)
+		print("  %t")
+		cg_print_int(t)
+		print(" = sub i32 0, %t")
+		cg_print_int(inner)
+		print("\n")
+		return t
+
+	if kind == NODE_STRING:
+		let si: i32 = cg.string_count
+		cg.string_toks[si] = n[node_idx].a
+		cg.string_count = cg.string_count + 1
+		let t: i32 = cg_fresh(cg)
+		# String-GEP — Länge berechnen wir zur Laufzeit nicht,
+		# wir nutzen @strN direkt
+		print("  %t")
+		cg_print_int(t)
+		print(" = getelementptr inbounds [0 x i8], [0 x i8]* @str")
+		cg_print_int(si)
+		print(", i32 0, i32 0\n")
+		return t
+
+	if kind == NODE_IDENT:
+		let name_tok: i32 = n[node_idx].a
+		let reg: i32 = cg_scope_get_reg(cg, name_tok)
+		let is_ptr: i32 = cg_scope_get_ptr(cg, name_tok)
+		if is_ptr == 1:
+			let t: i32 = cg_fresh(cg)
+			print("  %t")
+			cg_print_int(t)
+			print(" = load i32, i32* %t")
+			cg_print_int(reg)
+			print("\n")
+			return t
+		return reg
+
+	if kind == NODE_BINOP:
+		return cg_gen_binop(cg, node_idx)
+
+	if kind == NODE_ASSIGN:
+		return cg_gen_assign(cg, node_idx)
+
+	if kind == NODE_FUNCCALL:
+		return cg_gen_call(cg, node_idx)
+
+	if kind == NODE_MEMBER:
+		return cg_gen_member(cg, node_idx)
+
+	if kind == NODE_INDEX:
+		return cg_gen_index(cg, node_idx)
+
+	return -1
+
+def cg_gen_binop(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let left: i32 = cg_gen_expr(cg, n[node_idx].a)
+	let right: i32 = cg_gen_expr(cg, n[node_idx].c)
+	let op_tok: i32 = n[node_idx].b
+	let t: i32 = cg_fresh(cg)
+
+	print("  %t")
+	cg_print_int(t)
+	print(" = ")
+
+	if tok_matches(cg.p.source, cg.p.tokens[op_tok].start, cg.p.tokens[op_tok].length, "+") == 1:
+		print("add i32 %t")
+		cg_print_int(left)
+		print(", %t")
+		cg_print_int(right)
+	if tok_matches(cg.p.source, cg.p.tokens[op_tok].start, cg.p.tokens[op_tok].length, "-") == 1:
+		print("sub i32 %t")
+		cg_print_int(left)
+		print(", %t")
+		cg_print_int(right)
+	if tok_matches(cg.p.source, cg.p.tokens[op_tok].start, cg.p.tokens[op_tok].length, "*") == 1:
+		print("mul i32 %t")
+		cg_print_int(left)
+		print(", %t")
+		cg_print_int(right)
+	if tok_matches(cg.p.source, cg.p.tokens[op_tok].start, cg.p.tokens[op_tok].length, "/") == 1:
+		print("sdiv i32 %t")
+		cg_print_int(left)
+		print(", %t")
+		cg_print_int(right)
+	if tok_matches(cg.p.source, cg.p.tokens[op_tok].start, cg.p.tokens[op_tok].length, "%") == 1:
+		print("srem i32 %t")
+		cg_print_int(left)
+		print(", %t")
+		cg_print_int(right)
+	if tok_matches(cg.p.source, cg.p.tokens[op_tok].start, cg.p.tokens[op_tok].length, "==") == 1:
+		print("icmp eq i32 %t")
+		cg_print_int(left)
+		print(", %t")
+		cg_print_int(right)
+	if tok_matches(cg.p.source, cg.p.tokens[op_tok].start, cg.p.tokens[op_tok].length, "!=") == 1:
+		print("icmp ne i32 %t")
+		cg_print_int(left)
+		print(", %t")
+		cg_print_int(right)
+	if tok_matches(cg.p.source, cg.p.tokens[op_tok].start, cg.p.tokens[op_tok].length, "<") == 1:
+		print("icmp slt i32 %t")
+		cg_print_int(left)
+		print(", %t")
+		cg_print_int(right)
+	if tok_matches(cg.p.source, cg.p.tokens[op_tok].start, cg.p.tokens[op_tok].length, ">") == 1:
+		print("icmp sgt i32 %t")
+		cg_print_int(left)
+		print(", %t")
+		cg_print_int(right)
+	if tok_matches(cg.p.source, cg.p.tokens[op_tok].start, cg.p.tokens[op_tok].length, "<=") == 1:
+		print("icmp sle i32 %t")
+		cg_print_int(left)
+		print(", %t")
+		cg_print_int(right)
+	if tok_matches(cg.p.source, cg.p.tokens[op_tok].start, cg.p.tokens[op_tok].length, ">=") == 1:
+		print("icmp sge i32 %t")
+		cg_print_int(left)
+		print(", %t")
+		cg_print_int(right)
+	print("\n")
+	return t
+
+def cg_gen_assign(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let left_idx: i32 = n[node_idx].a
+	let right_idx: i32 = n[node_idx].c
+	let val: i32 = cg_gen_expr(cg, right_idx)
+
+	# Linke Seite: IDENT
+	if n[left_idx].kind == NODE_IDENT:
+		let name_tok: i32 = n[left_idx].a
+		let reg: i32 = cg_scope_get_reg(cg, name_tok)
+		print("  store i32 %t")
+		cg_print_int(val)
+		print(", i32* %t")
+		cg_print_int(reg)
+		print("\n")
+		return val
+
+	# Linke Seite: MEMBER (p.field = val)
+	if n[left_idx].kind == NODE_MEMBER:
+		let obj_reg: i32 = cg_gen_expr(cg, n[left_idx].a)
+		let member_tok: i32 = n[left_idx].b
+		# Struct-Name aus obj_reg ermitteln — vereinfacht: wir suchen im scope
+		# TODO: korrekte Typ-Inferenz, erstmal i32-Annahme
+		let gep: i32 = cg_fresh(cg)
+		print("  %t")
+		cg_print_int(gep)
+		print(" = getelementptr i32, i32* %t")
+		cg_print_int(obj_reg)
+		print(", i32 0\n")
+		print("  store i32 %t")
+		cg_print_int(val)
+		print(", i32* %t")
+		cg_print_int(gep)
+		print("\n")
+		return val
+
+	# Linke Seite: INDEX (arr[i] = val)
+	if n[left_idx].kind == NODE_INDEX:
+		let arr_reg: i32 = cg_gen_expr(cg, n[left_idx].a)
+		let idx_reg: i32 = cg_gen_expr(cg, n[left_idx].b)
+		let gep: i32 = cg_fresh(cg)
+		print("  %t")
+		cg_print_int(gep)
+		print(" = getelementptr i32, i32* %t")
+		cg_print_int(arr_reg)
+		print(", i32 %t")
+		cg_print_int(idx_reg)
+		print("\n")
+		print("  store i32 %t")
+		cg_print_int(val)
+		print(", i32* %t")
+		cg_print_int(gep)
+		print("\n")
+		return val
+
+	return val
+
+def cg_gen_call(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let name_tok: i32 = n[node_idx].a
+	let arg_start: i32 = n[node_idx].b
+	let arg_count: i32 = n[node_idx].c
+
+	# print builtin (name_tok == 1 ist unser Marker)
+	if name_tok == 1:
+		let arg_node: i32 = cg.p.body[arg_start].node
+		let arg_reg: i32 = cg_gen_expr(cg, arg_node)
+		# String oder Int? Wir schauen auf den Node-Kind
+		if n[arg_node].kind == NODE_STRING:
+			let t: i32 = cg_fresh(cg)
+			print("  %t")
+			cg_print_int(t)
+			print(" = call i64 @strlen(i8* %t")
+			cg_print_int(arg_reg)
+			print(")\n")
+			let t2: i32 = cg_fresh(cg)
+			print("  %t")
+			cg_print_int(t2)
+			print(" = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{dirflag},~{fpsr},~{flags}\"(i64 1, i64 1, i8* %t")
+			cg_print_int(arg_reg)
+			print(", i64 %t")
+			cg_print_int(t)
+			print(")\n")
+			return t2
+		# Int
+		print("  call void @__cobra_print_int(i32 %t")
+		cg_print_int(arg_reg)
+		print(")\n")
+		return -1
+
+	# syscall builtin
+	if cg_tok_eq_str(cg, name_tok, "syscall") == 1:
+		return cg_gen_syscall(cg, node_idx)
+
+	# alloc builtin
+	if cg_tok_eq_str(cg, name_tok, "alloc") == 1:
+		return cg_gen_alloc(cg, node_idx)
+
+	# streq builtin
+	if cg_tok_eq_str(cg, name_tok, "streq") == 1:
+		let a_node: i32 = cg.p.body[arg_start].node
+		let b_node: i32 = cg.p.body[arg_start + 1].node
+		let a_reg: i32 = cg_gen_expr(cg, a_node)
+		let b_reg: i32 = cg_gen_expr(cg, b_node)
+		let t: i32 = cg_fresh(cg)
+		print("  %t")
+		cg_print_int(t)
+		print(" = call i1 @streq(i8* %t")
+		cg_print_int(a_reg)
+		print(", i8* %t")
+		cg_print_int(b_reg)
+		print(")\n")
+		return t
+
+	# normaler Funktionsaufruf
+	# Args generieren
+	let arg_regs: ptr<i32> = alloc(64)
+	let i: i32 = 0
+	while i < arg_count:
+		let arg_node: i32 = cg.p.body[arg_start + i].node
+		arg_regs[i] = cg_gen_expr(cg, arg_node)
+		i = i + 1
+
+	let t: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(t)
+	print(" = call i32 @")
+	cg_print_tok(cg, name_tok)
+	print("(")
+	i = 0
+	while i < arg_count:
+		if i > 0:
+			print(", ")
+		print("i32 %t")
+		cg_print_int(arg_regs[i])
+		i = i + 1
+	print(")\n")
+	return t
+
+def cg_gen_syscall(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let arg_start: i32 = n[node_idx].b
+	let arg_count: i32 = n[node_idx].c
+	let arg_regs: ptr<i32> = alloc(16)
+	let i: i32 = 0
+	while i < arg_count:
+		arg_regs[i] = cg_gen_expr(cg, cg.p.body[arg_start + i].node)
+		i = i + 1
+	let t: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(t)
+	print(" = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},{r10},{r8},{r9},~{dirflag},~{fpsr},~{flags}\"(")
+	i = 0
+	while i < arg_count:
+		if i > 0:
+			print(", ")
+		print("i64 %t")
+		cg_print_int(arg_regs[i])
+		i = i + 1
+	print(")\n")
+	return t
+
+def cg_gen_alloc(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let arg_start: i32 = n[node_idx].b
+	let count_reg: i32 = cg_gen_expr(cg, cg.p.body[arg_start].node)
+	# Größe = count * 4 (i32), für Structs TODO: korrekte Größe
+	let sz: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(sz)
+	print(" = mul i32 %t")
+	cg_print_int(count_reg)
+	print(", 4\n")
+	let sz64: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(sz64)
+	print(" = sext i32 %t")
+	cg_print_int(sz)
+	print(" to i64\n")
+	let ptr_raw: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(ptr_raw)
+	print(" = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},{r10},{r8},{r9},~{dirflag},~{fpsr},~{flags}\"(i64 9, i64 0, i64 %t")
+	cg_print_int(sz64)
+	print(", i64 3, i64 34, i64 -1, i64 0)\n")
+	let t: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(t)
+	print(" = inttoptr i64 %t")
+	cg_print_int(ptr_raw)
+	print(" to i32*\n")
+	return t
+
+def cg_gen_member(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let obj_reg: i32 = cg_gen_expr(cg, n[node_idx].a)
+	# Vereinfacht: member-Zugriff als i32-GEP mit Offset 0
+	# TODO: korrekte Struct-Typ-Inferenz und Feldindex
+	let t: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(t)
+	print(" = load i32, i32* %t")
+	cg_print_int(obj_reg)
+	print("\n")
+	return t
+
+def cg_gen_index(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let arr_reg: i32 = cg_gen_expr(cg, n[node_idx].a)
+	let idx_reg: i32 = cg_gen_expr(cg, n[node_idx].b)
+	let gep: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(gep)
+	print(" = getelementptr i32, i32* %t")
+	cg_print_int(arr_reg)
+	print(", i32 %t")
+	cg_print_int(idx_reg)
+	print("\n")
+	let t: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(t)
+	print(" = load i32, i32* %t")
+	cg_print_int(gep)
+	print("\n")
+	return t
+
+# ===== Statements =====
+
+def cg_gen_stmt(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let kind: i32 = n[node_idx].kind
+
+	if kind == NODE_LET:
+		return cg_gen_let(cg, node_idx)
+	if kind == NODE_RETURN:
+		return cg_gen_return(cg, node_idx)
+	if kind == NODE_IF:
+		return cg_gen_if(cg, node_idx)
+	if kind == NODE_WHILE:
+		return cg_gen_while(cg, node_idx)
+	if kind == NODE_FOR:
+		return cg_gen_for(cg, node_idx)
+	if kind == NODE_BREAK:
+		print("  br label %lend")
+		cg_print_int(cg.loop_end[cg.loop_depth])
+		print("\n")
+		return 0
+	if kind == NODE_CONTINUE:
+		print("  br label %lcond")
+		cg_print_int(cg.loop_cond[cg.loop_depth])
+		print("\n")
+		return 0
+	# Expr-Statement
+	cg_gen_expr(cg, node_idx)
+	return 0
+
+def cg_gen_let(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let name_tok: i32 = n[node_idx].a
+	let val_node: i32 = n[node_idx].c
+
+	# alloc-Sonderfall: Pointer direkt speichern
+	if n[val_node].kind == NODE_FUNCCALL:
+		if cg_tok_eq_str(cg, n[val_node].a, "alloc") == 1:
+			let reg: i32 = cg_gen_alloc(cg, val_node)
+			cg_scope_set(cg, name_tok, reg, 0)
+			return 0
+
+	let val: i32 = cg_gen_expr(cg, val_node)
+	# alloca für die Variable
+	let ptr_reg: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(ptr_reg)
+	print(" = alloca i32\n")
+	print("  store i32 %t")
+	cg_print_int(val)
+	print(", i32* %t")
+	cg_print_int(ptr_reg)
+	print("\n")
+	cg_scope_set(cg, name_tok, ptr_reg, 1)
+	return 0
+
+def cg_gen_return(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let val_node: i32 = n[node_idx].a
+	let val: i32 = cg_gen_expr(cg, val_node)
+	print("  ret i32 %t")
+	cg_print_int(val)
+	print("\n")
+	return 0
+
+def cg_gen_if(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let cond_node: i32 = n[node_idx].a
+	let then_start: i32 = n[node_idx].b
+	let then_count: i32 = n[node_idx].c
+	let else_start: i32 = n[node_idx].d
+	let else_count: i32 = n[node_idx].e
+
+	let lbl: i32 = cg_fresh_label(cg)
+	let cond_reg: i32 = cg_gen_expr(cg, cond_node)
+
+	# i32 → i1
+	let cmp: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(cmp)
+	print(" = icmp ne i32 %t")
+	cg_print_int(cond_reg)
+	print(", 0\n")
+
+	if else_count > 0:
+		print("  br i1 %t")
+		cg_print_int(cmp)
+		print(", label %ifthen")
+		cg_print_int(lbl)
+		print(", label %ifelse")
+		cg_print_int(lbl)
+		print("\n")
+	else:
+		print("  br i1 %t")
+		cg_print_int(cmp)
+		print(", label %ifthen")
+		cg_print_int(lbl)
+		print(", label %ifend")
+		cg_print_int(lbl)
+		print("\n")
+
+	print("ifthen")
+	cg_print_int(lbl)
+	print(":\n")
+	let i: i32 = 0
+	while i < then_count:
+		cg_gen_stmt(cg, cg.p.body[then_start + i].node)
+		i = i + 1
+	print("  br label %ifend")
+	cg_print_int(lbl)
+	print("\n")
+
+	if else_count > 0:
+		print("ifelse")
+		cg_print_int(lbl)
+		print(":\n")
+		i = 0
+		while i < else_count:
+			cg_gen_stmt(cg, cg.p.body[else_start + i].node)
+			i = i + 1
+		print("  br label %ifend")
+		cg_print_int(lbl)
+		print("\n")
+
+	print("ifend")
+	cg_print_int(lbl)
+	print(":\n")
+	return 0
+
+def cg_gen_while(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let cond_node: i32 = n[node_idx].a
+	let body_start: i32 = n[node_idx].b
+	let body_count: i32 = n[node_idx].c
+
+	let lbl: i32 = cg_fresh_label(cg)
+	cg.loop_depth = cg.loop_depth + 1
+	cg.loop_cond[cg.loop_depth] = lbl
+	cg.loop_end[cg.loop_depth] = lbl + 1
+
+	print("  br label %wcond")
+	cg_print_int(lbl)
+	print("\n")
+	print("wcond")
+	cg_print_int(lbl)
+	print(":\n")
+
+	let cond_reg: i32 = cg_gen_expr(cg, cond_node)
+	let cmp: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(cmp)
+	print(" = icmp ne i32 %t")
+	cg_print_int(cond_reg)
+	print(", 0\n")
+	print("  br i1 %t")
+	cg_print_int(cmp)
+	print(", label %wbody")
+	cg_print_int(lbl)
+	print(", label %wend")
+	cg_print_int(lbl)
+	print("\n")
+
+	print("wbody")
+	cg_print_int(lbl)
+	print(":\n")
+	let i: i32 = 0
+	while i < body_count:
+		cg_gen_stmt(cg, cg.p.body[body_start + i].node)
+		i = i + 1
+	print("  br label %wcond")
+	cg_print_int(lbl)
+	print("\n")
+
+	print("wend")
+	cg_print_int(lbl)
+	print(":\n")
+	cg.loop_depth = cg.loop_depth - 1
+	return 0
+
+def cg_gen_for(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let var_tok: i32 = n[node_idx].a
+	let end_node: i32 = n[node_idx].b
+	let body_start: i32 = n[node_idx].c
+	let body_count: i32 = n[node_idx].d
+
+	# Loop-Variable allozieren
+	let ptr_reg: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(ptr_reg)
+	print(" = alloca i32\n")
+	print("  store i32 0, i32* %t")
+	cg_print_int(ptr_reg)
+	print("\n")
+	cg_scope_set(cg, var_tok, ptr_reg, 1)
+
+	let lbl: i32 = cg_fresh_label(cg)
+	cg.loop_depth = cg.loop_depth + 1
+	cg.loop_cond[cg.loop_depth] = lbl
+	cg.loop_end[cg.loop_depth] = lbl + 1
+
+	print("  br label %fcond")
+	cg_print_int(lbl)
+	print("\n")
+	print("fcond")
+	cg_print_int(lbl)
+	print(":\n")
+
+	let cur: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(cur)
+	print(" = load i32, i32* %t")
+	cg_print_int(ptr_reg)
+	print("\n")
+
+	let end_reg: i32 = cg_gen_expr(cg, end_node)
+	let cmp: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(cmp)
+	print(" = icmp slt i32 %t")
+	cg_print_int(cur)
+	print(", %t")
+	cg_print_int(end_reg)
+	print("\n")
+	print("  br i1 %t")
+	cg_print_int(cmp)
+	print(", label %fbody")
+	cg_print_int(lbl)
+	print(", label %fend")
+	cg_print_int(lbl)
+	print("\n")
+
+	print("fbody")
+	cg_print_int(lbl)
+	print(":\n")
+	let i: i32 = 0
+	while i < body_count:
+		cg_gen_stmt(cg, cg.p.body[body_start + i].node)
+		i = i + 1
+
+	# i++
+	let inc: i32 = cg_fresh(cg)
+	let cur2: i32 = cg_fresh(cg)
+	print("  %t")
+	cg_print_int(cur2)
+	print(" = load i32, i32* %t")
+	cg_print_int(ptr_reg)
+	print("\n")
+	print("  %t")
+	cg_print_int(inc)
+	print(" = add i32 %t")
+	cg_print_int(cur2)
+	print(", 1\n")
+	print("  store i32 %t")
+	cg_print_int(inc)
+	print(", i32* %t")
+	cg_print_int(ptr_reg)
+	print("\n")
+	print("  br label %fcond")
+	cg_print_int(lbl)
+	print("\n")
+
+	print("fend")
+	cg_print_int(lbl)
+	print(":\n")
+	cg.loop_depth = cg.loop_depth - 1
+	return 0
+
+# ===== Funktionsdefinition =====
+
+def cg_gen_funcdef(cg: ptr<Codegen>, node_idx: i32) -> i32:
+	let n: ptr<ASTNode> = cg.p.nodes
+	let name_tok: i32 = n[node_idx].a
+	let param_start: i32 = n[node_idx].b
+	let param_count: i32 = n[node_idx].c
+	let body_start: i32 = n[node_idx].d
+	let body_count: i32 = n[node_idx].e
+	let ret_tok: i32 = n[node_idx].f
+
+	# Reset scope + tmp pro Funktion
+	cg.tmp = 0
+	cg.scope_count = 0
+
+	# Signatur
+	print("define i32 @")
+	cg_print_tok(cg, name_tok)
+	print("(")
+
+	let i: i32 = 0
+	while i < param_count:
+		if i > 0:
+			print(", ")
+		print("i32 %p")
+		cg_print_int(i)
+		i = i + 1
+	print(") {\nentry:\n")
+
+	# Parameter in Scope laden
+	i = 0
+	while i < param_count:
+		let pname: i32 = cg.p.params[param_start + i].name_tok
+		let ptr_reg: i32 = cg_fresh(cg)
+		print("  %t")
+		cg_print_int(ptr_reg)
+		print(" = alloca i32\n")
+		print("  store i32 %p")
+		cg_print_int(i)
+		print(", i32* %t")
+		cg_print_int(ptr_reg)
+		print("\n")
+		cg_scope_set(cg, pname, ptr_reg, 1)
+		i = i + 1
+
+	# Body
+	i = 0
+	while i < body_count:
+		cg_gen_stmt(cg, cg.p.body[body_start + i].node)
+		i = i + 1
+
+	print("  ret i32 0\n}\n\n")
+	return 0
+
+# ===== Haupt-Codegen =====
+
+def codegen(p: ptr<Parser>) -> i32:
+	let cg: ptr<Codegen> = alloc(1)
+	cg.p = p
+	cg.tmp = 0
+	cg.label_count = 0
+	cg.struct_names = alloc(128)
+	cg.struct_field_start = alloc(128)
+	cg.struct_field_count = alloc(128)
+	cg.struct_count = 0
+	cg.field_names = alloc(1024)
+	cg.field_types = alloc(1024)
+	cg.field_count = 0
+	cg.string_toks = alloc(512)
+	cg.string_count = 0
+	cg.loop_cond = alloc(64)
+	cg.loop_end = alloc(64)
+	cg.loop_depth = 0
+	cg.scope_names = alloc(512)
+	cg.scope_regs = alloc(512)
+	cg.scope_is_ptr = alloc(512)
+	cg.scope_count = 0
+
+	let root: i32 = p.body[0].node
+	let body_start: i32 = p.nodes[root].b
+	let body_count: i32 = p.nodes[root].c
+
+	# 1. Structs registrieren
+	let i: i32 = 0
+	while i < body_count:
+		let node_idx: i32 = p.body[body_start + i].node
+		if p.nodes[node_idx].kind == NODE_STRUCT:
+			cg_register_struct(cg, node_idx)
+		i = i + 1
+
+	# 2. Header ausgeben
+	cg_emit_builtins(cg)
+	cg_emit_struct_defs(cg)
+
+	# 3. Funktionen ausgeben
+	i = 0
+	while i < body_count:
+		let node_idx: i32 = p.body[body_start + i].node
+		if p.nodes[node_idx].kind == NODE_FUNCDEF:
+			cg_gen_funcdef(cg, node_idx)
+		i = i + 1
+
+	# 4. _start
+	cg_emit_start(cg)
+	return 0
+
+# ===== main =====
+
+def main() -> i32:
+	let source: ptr<u8> = "def add(a: i32, b: i32) -> i32:\n    return a\ndef main() -> i32:\n    let x: i32 = add(1, 2)\n    print(x)\n    print(\"\n\")\n    return 0\n"
+	let tokens: ptr<Token> = alloc(2048)
+	let indent_stack: ptr<i32> = alloc(64)
+	let length: i32 = 96
+
+	let tok_count: i32 = tokenize(source, length, tokens, indent_stack)
+
+	let p: ptr<Parser> = alloc(1)
+	p.tokens = tokens
+	p.source = source
+	p.pos = 0
+	p.count = tok_count
+	p.nodes = alloc(4096)
+	p.node_count = 0
+	p.params = alloc(256)
+	p.param_count = 0
+	p.fields = alloc(256)
+	p.field_count = 0
+	p.body = alloc(4096)
+	p.body_count = 0
+
+	let root: i32 = parse_program(p)
+
+	# Root in body[0] speichern damit codegen es findet
+	p.body[0].node = root
+
+	codegen(p)
+	return 0

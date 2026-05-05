@@ -24,7 +24,7 @@ TOKEN_PATTERNS = [
     ("STRING",   r'"[^"]*"'),
     ("ARROW",    r"->"),
     ("NUMBER",   r"0x[0-9a-fA-F]+|\d+"),
-    ("CHAR", r"'\\?.'"),  # matched 'x' und '\n'
+    ("CHAR",     r"'\\?.'"),  # matched 'x' und '\n'
     ("IDENT",    r"[a-zA-Z_][a-zA-Z0-9_]*"),
     ("OP",       r"[+\-*/<>=!&|%]+"),
     ("COLON",    r":"),
@@ -82,7 +82,8 @@ def tokenize(source: str) -> list[Token]:
     for m in re.finditer(MASTER, source):
         kind = m.lastgroup
         value = m.group()
-        col = m.start() - line_start
+        raw_indent = source[line_start:m.start()]
+        col = sum(4 if c == "\t" else 1 for c in raw_indent)
 
         # 1. Unwichtiges überspringen
         if kind in ("COMMENT", "SPACE"):
@@ -105,11 +106,13 @@ def tokenize(source: str) -> list[Token]:
                     value = str(ord('\n'))
                 elif value[2] == 't':
                     value = str(ord('\t'))
+                elif value[2] == '"':
+                    value = str(ord('\"'))
+                elif value[2] == "'":
+                    value = str(ord("'"))
                 elif value[2] == '0':
-                    print("null")
                     value = str(0)
                 elif value[2] == 'x':
-                    print("hex")
                     hex_val = value[3:5]
                     value = str(int(hex_val, 16))
                 else:
@@ -965,7 +968,38 @@ entry:
             self.gen_if(node)
         if isinstance(node, BinOp):
             if node.op == "=":
-                reg, ty = self.gen_expr(node.right)
+                if isinstance(node.left, MemberAccess):
+                    # tokens[tok_count].type = val   (oder p.nodes = alloc(...))
+                    obj = node.left.obj
+                    member = node.left.member
+
+                    ptr_reg, ptr_type = self.gen_expr(obj)
+                    struct_name = ptr_type.lstrip("%").rstrip("*")
+                    fields = self.structs[struct_name]
+                    idx = next(i for i, (f, _) in enumerate(fields) if f == member)
+                    field_type = fields[idx][1]
+
+                    # alloc auf der rechten Seite: Zieltyp vom Feld übergeben
+                    if isinstance(node.right, FuncCall) and node.right.name == "alloc":
+                        val_reg, val_ty = self.gen_alloc(node.right, field_type)
+                    else:
+                        val_reg, val_ty = self.gen_expr(node.right)
+
+                    gep = self.fresh()
+                    self.emit(f"  {gep} = getelementptr %{struct_name}, %{struct_name}* {ptr_reg}, i32 0, i32 {idx}")
+                    self.emit(f"  store {field_type} {val_reg}, {field_type}* {gep}")
+                    return val_reg, val_ty
+
+                # alloc auf der rechten Seite bei einfachem Ident-Assignment
+                if isinstance(node.right, FuncCall) and node.right.name == "alloc":
+                    if isinstance(node.left, Ident) and node.left.name in self.scope:
+                        _, target_ty, _ = self.scope[node.left.name]
+                        reg, ty = self.gen_alloc(node.right, target_ty)
+                    else:
+                        reg, ty = self.gen_expr(node.right)
+                else:
+                    reg, ty = self.gen_expr(node.right)
+
                 if isinstance(node.left, Ident):
                     ptr, _, _ = self.scope[node.left.name]
                     self.emit(f"  store {ty} {reg}, {ty}* {ptr}")
@@ -976,22 +1010,6 @@ entry:
                     self.emit(f"  {gep_reg} = getelementptr i32, i32* {ptr_reg}, i32 {idx_reg}")
                     self.emit(f"  store i32 {reg}, i32* {gep_reg}")
                     return reg, ty
-                if isinstance(node.left, MemberAccess):
-                    # tokens[tok_count].type = val
-                    obj = node.left.obj  # IndexAccess(tokens, tok_count)
-                    member = node.left.member
-
-                    ptr_reg, ptr_type = self.gen_expr(obj)  # gibt %Token* zurück
-                    struct_name = ptr_type.lstrip("%").rstrip("*")
-                    fields = self.structs[struct_name]
-                    idx = next(i for i, (f, _) in enumerate(fields) if f == member)
-                    field_type = fields[idx][1]
-
-                    val_reg, val_ty = self.gen_expr(node.right)
-                    gep = self.fresh()
-                    self.emit(f"  {gep} = getelementptr %{struct_name}, %{struct_name}* {ptr_reg}, i32 0, i32 {idx}")
-                    self.emit(f"  store {field_type} {val_reg}, {field_type}* {gep}")
-                    return val_reg, val_ty
                 return reg, ty
 
             l_reg, l_ty = self.gen_expr(node.left)

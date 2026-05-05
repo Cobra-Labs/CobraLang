@@ -2,6 +2,29 @@ from lexer import Token
 from lexer import tokenize
 from lexer import tok_matches
 
+# Token-Typ Konstanten (aus lexer)
+let TOK_IDENT: i32 = 1
+let TOK_NUMBER: i32 = 2
+let TOK_STRING: i32 = 3
+let TOK_KEYWORD: i32 = 4
+let TOK_TYPE: i32 = 5
+let TOK_OP: i32 = 6
+let TOK_COLON: i32 = 7
+let TOK_COMMA: i32 = 8
+let TOK_LPAREN: i32 = 9
+let TOK_RPAREN: i32 = 10
+let TOK_LBRACE: i32 = 11
+let TOK_RBRACE: i32 = 12
+let TOK_LBRACKET: i32 = 13
+let TOK_RBRACKET: i32 = 14
+let TOK_NEWLINE: i32 = 15
+let TOK_INDENT: i32 = 16
+let TOK_DEDENT: i32 = 17
+let TOK_ARROW: i32 = 18
+let TOK_DOT: i32 = 19
+let TOK_EOF: i32 = 20
+
+# ===== AST Node Kinds ===== #
 let NODE_PROGRAM: i32 = 1
 let NODE_FUNCDEF: i32 = 2
 let NODE_LET: i32 = 3
@@ -12,116 +35,613 @@ let NODE_BINOP: i32 = 7
 let NODE_IDENT: i32 = 8
 let NODE_NUMBER: i32 = 9
 let NODE_FUNCCALL: i32 = 10
+let NODE_STRUCT: i32 = 11
+let NODE_MEMBER: i32 = 12
+let NODE_INDEX: i32 = 13
+let NODE_STRING: i32 = 14
+let NODE_FOR: i32 = 15
+let NODE_BREAK: i32 = 16
+let NODE_CONTINUE: i32 = 17
+let NODE_STRUCTLIT: i32 = 18
+let NODE_ASSIGN: i32 = 19
+let NODE_NEG: i32 = 20
+
+# ===== ASTNode Struct =====
+# Flat-Array AST: jeder Node ist ein Index.
+# Felder sind generisch — Bedeutung je nach kind:
+#
+#  NODE_FUNCDEF:  a=name-tok  b=params-start  c=param-count  d=body-start  e=body-count  f=return-type-tok
+#  NODE_LET:      a=name-tok  b=type-tok  c=value-node
+#  NODE_RETURN:   a=value-node
+#  NODE_IF:       a=cond-node  b=then-start  c=then-count  d=else-start  e=else-count
+#  NODE_WHILE:    a=cond-node  b=body-start  c=body-count
+#  NODE_FOR:      a=var-tok   b=end-node   c=body-start  d=body-count
+#  NODE_BINOP:    a=left-node  b=op-tok  c=right-node
+#  NODE_ASSIGN:   a=left-node  c=right-node
+#  NODE_IDENT:    a=tok-idx
+#  NODE_NUMBER:   a=tok-idx
+#  NODE_STRING:   a=tok-idx
+#  NODE_FUNCCALL: a=name-tok  b=args-start  c=arg-count
+#  NODE_MEMBER:   a=obj-node  b=member-tok
+#  NODE_INDEX:    a=obj-node  b=index-node
+#  NODE_STRUCT:   a=name-tok  b=fields-start  c=field-count
+#  NODE_STRUCTLIT:a=name-tok  b=fields-start  c=field-count
+#  NODE_BREAK/CONTINUE: (leer)
 
 struct ASTNode:
-    kind: i32
-    a: i32   # left / value / name-token
-    b: i32   # right / param-count
-    c: i32   # op-token / body-start
-    d: i32   # body-end / next
+	kind: i32
+	a: i32
+	b: i32
+	c: i32
+	d: i32
+	e: i32
+	f: i32
+
+# Param: name-tok + type-tok
+struct Param:
+	name_tok: i32
+	type_tok: i32
+	type_is_ptr: i32   # 1 = ptr<X>, dann inner_tok = X
+	inner_tok: i32
+
+# Field: wie Param
+struct Field:
+	name_tok: i32
+	type_tok: i32
+	type_is_ptr: i32
+	inner_tok: i32
+
+# Arg: node-idx
+struct Arg:
+	node: i32
+
+# BodyEntry: node-idx (für Bodies und arg-listen)
+struct BodyEntry:
+	node: i32
 
 struct Parser:
-    tokens: ptr<Token>
-    source: ptr<u8>
-    pos: i32
-    count: i32
-    nodes: ptr<ASTNode>
-    node_count: i32
+	tokens: ptr<Token>
+	source: ptr<u8>
+	pos: i32
+	count: i32
+	nodes: ptr<ASTNode>
+	node_count: i32
+	params: ptr<Param>
+	param_count: i32
+	fields: ptr<Field>
+	field_count: i32
+	body: ptr<BodyEntry>
+	body_count: i32
 
-def main() -> i32:
-    let source: ptr<u8> = "def main() -> i32:\n    return 0\n"
-    let tokens: ptr<Token> = alloc(1000)
-    let indent_stack: ptr<i32> = alloc(100)
-    let count: i32 = tokenize(source, 33, tokens, indent_stack)
-    let p: ptr<Parser> = alloc(1)
-    p.tokens = tokens
-    p.pos = 0
-    p.count = count
-    p.nodes = alloc(1000)
-    p.node_count = 0
-    p.source = source
-    let root: i32 = parse_program(p)
-    print("Nodes: ")
-    print(p.node_count)
-    print("\n")
-    if tok_matches(p.source, p.tokens[t].start, p.tokens[t].length, "return") == 1:
-        return parse_return(p)
-    return 0
+# ===== Basis-Operationen ===== #
 
 def parser_peek(p: ptr<Parser>) -> i32:
-    return p.tokens[p.pos].type
+	return p.tokens[p.pos].type
+
+def parser_peek_val(p: ptr<Parser>, word: ptr<u8>) -> i32:
+	let t: i32 = p.pos
+	return tok_matches(p.source, p.tokens[t].start, p.tokens[t].length, word)
 
 def parser_eat(p: ptr<Parser>) -> i32:
-    let idx: i32 = p.pos
-    p.pos = p.pos + 1
-    return idx
+	let idx: i32 = p.pos
+	p.pos = p.pos + 1
+	return idx
 
 def parser_new_node(p: ptr<Parser>, kind: i32) -> i32:
-    let idx: i32 = p.node_count
-    p.nodes[idx].kind = kind
-    p.nodes[idx].a = 0
-    p.nodes[idx].b = 0
-    p.nodes[idx].c = 0
-    p.nodes[idx].d = 0
-    p.node_count = p.node_count + 1
-    return idx
+	let idx: i32 = p.node_count
+	p.nodes[idx].kind = kind
+	p.nodes[idx].a = 0
+	p.nodes[idx].b = 0
+	p.nodes[idx].c = 0
+	p.nodes[idx].d = 0
+	p.nodes[idx].e = 0
+	p.nodes[idx].f = 0
+	p.node_count = p.node_count + 1
+	return idx
 
 def parse_skip_newlines(p: ptr<Parser>) -> i32:
-    while parser_peek(p) == TOK_NEWLINE:
-        parser_eat(p)
-    return 0
+	while parser_peek(p) == TOK_NEWLINE:
+		parser_eat(p)
+	return 0
+
+# ===== Type Parser ===== #
+# Gibt tok-idx zurück. Setzt type_is_ptr=1 + inner_tok wenn ptr<X>.
+# Weil Cobra keine Mehrfachrückgaben hat, schreiben wir in ein
+# Param-Slot das gerade befüllt wird — daher immer vor dem Aufruf
+# param_count merken und danach lesen.
+#
+# Einfachere Lösung: parse_type gibt den Token-Index des Basis-Typs zurück,
+# und parse_type_is_ptr / parse_type_inner sind separate Funktionen
+# die dasselbe Token nochmal anschauen — aber da wir essen müssen,
+# nutzen wir ein kleines Hilfs-Struct das wir temporär in params[0] schreiben.
+
+def parse_type_into(p: ptr<Parser>, slot: ptr<Param>) -> i32:
+	slot.type_is_ptr = 0
+	slot.inner_tok = 0
+	if parser_peek(p) == TOK_TYPE:
+		let t: i32 = parser_eat(p)
+		slot.type_tok = t
+		# ptr<X> ?
+		if tok_matches(p.source, p.tokens[t].start, p.tokens[t].length, "ptr") == 1:
+			if parser_peek(p) == TOK_OP:
+				if tok_matches(p.source, p.tokens[p.pos].start, p.tokens[p.pos].length, "<") == 1:
+					parser_eat(p)   # <
+					let inner: i32 = parser_eat(p)  # X
+					slot.inner_tok = inner
+					slot.type_is_ptr = 1
+					parser_eat(p)   # >
+		return t
+	# Struct-Typ (IDENT)
+	if parser_peek(p) == TOK_IDENT:
+		let t: i32 = parser_eat(p)
+		slot.type_tok = t
+		return t
+	return 0
+
+# ===== parse_program ===== #
 
 def parse_program(p: ptr<Parser>) -> i32:
-    let root: i32 = parser_new_node(p, NODE_PROGRAM)
-    parse_skip_newlines(p)
-    while parser_peek(p) != TOK_EOF:
-        let stmt: i32 = parse_stmt(p)
-        parse_skip_newlines(p)
-    return root
+	let root: i32 = parser_new_node(p, NODE_PROGRAM)
+	let body_start: i32 = p.body_count
+	parse_skip_newlines(p)
+	while parser_peek(p) != TOK_EOF:
+		let stmt: i32 = parse_stmt(p)
+		if stmt >= 0:
+			p.body[p.body_count].node = stmt
+			p.body_count = p.body_count + 1
+		parse_skip_newlines(p)
+	p.nodes[root].b = body_start
+	p.nodes[root].c = p.body_count - body_start
+	return root
+
+# ===== parse_block ===== #
+# Gibt body_start zurück. Schreibt body_count in out_count[0].
+
+def parse_block(p: ptr<Parser>, out_count: ptr<i32>) -> i32:
+	parse_skip_newlines(p)
+	parser_eat(p)   # INDENT
+	parse_skip_newlines(p)
+	let body_start: i32 = p.body_count
+	while parser_peek(p) != TOK_DEDENT:
+		if parser_peek(p) == TOK_EOF:
+			break
+		let stmt: i32 = parse_stmt(p)
+		if stmt >= 0:
+			p.body[p.body_count].node = stmt
+			p.body_count = p.body_count + 1
+		parse_skip_newlines(p)
+	parser_eat(p)   # DEDENT
+	out_count[0] = p.body_count - body_start
+	return body_start
+
+# ===== parse_stmt ===== #
 
 def parse_stmt(p: ptr<Parser>) -> i32:
-    let tok: i32 = parser_peek(p)
-    if tok == TOK_KEYWORD:
-        let t: i32 = parser_eat(p)
-        if tok_matches(p.source, p.tokens[t].start, p.tokens[t].length, "return") == 1:
-            return parse_return(p)
-        if tok_matches(p.source, p.tokens[t].start, p.tokens[t].length, "let") == 1:
-            return parse_let(p)
-        if tok_matches(p.source, p.tokens[t].start, p.tokens[t].length, "if") == 1:
-            return parse_if(p)
-        if tok_matches(p.source, p.tokens[t].start, p.tokens[t].length, "while") == 1:
-            return parse_while(p)
-        if tok_matches(p.source, p.tokens[t].start, p.tokens[t].length, "def") == 1:
-            return parse_funcdef(p)
-        return 0
-    if tok == TOK_NEWLINE:
-        parser_eat(p)
-        return 0
-    if tok == TOK_INDENT:
-        parser_eat(p)
-        return 0
-    if tok == TOK_DEDENT:
-        parser_eat(p)
-        return 0
-    # Expression Statement (Zuweisung etc.)
-    return parse_expr(p)
+	parse_skip_newlines(p)
+	let tok: i32 = parser_peek(p)
+
+	if tok == TOK_KEYWORD:
+		if parser_peek_val(p, "def") == 1:
+			return parse_funcdef(p)
+		if parser_peek_val(p, "let") == 1:
+			return parse_let(p)
+		if parser_peek_val(p, "return") == 1:
+			return parse_return(p)
+		if parser_peek_val(p, "if") == 1:
+			return parse_if(p)
+		if parser_peek_val(p, "while") == 1:
+			return parse_while(p)
+		if parser_peek_val(p, "for") == 1:
+			return parse_for(p)
+		if parser_peek_val(p, "struct") == 1:
+			return parse_struct(p)
+		if parser_peek_val(p, "break") == 1:
+			parser_eat(p)
+			return parser_new_node(p, NODE_BREAK)
+		if parser_peek_val(p, "continue") == 1:
+			parser_eat(p)
+			return parser_new_node(p, NODE_CONTINUE)
+		if parser_peek_val(p, "from") == 1:
+			return parse_from_import(p)
+		if parser_peek_val(p, "import") == 1:
+			return parse_import(p)
+		# print als FuncCall behandeln
+		if parser_peek_val(p, "print") == 1:
+			return parse_print(p)
+		# unbekanntes keyword — überspringen
+		parser_eat(p)
+		return 1
+
+	if tok == TOK_NEWLINE:
+		parser_eat(p)
+		return 1
+	if tok == TOK_INDENT:
+		parser_eat(p)
+		return 1
+	if tok == TOK_DEDENT:
+		return 1
+
+	return parse_expr(p)
+
+# ===== parse_funcdef ===== #
+
+def parse_funcdef(p: ptr<Parser>) -> i32:
+	parser_eat(p)   # def
+	let name_tok: i32 = parser_eat(p)  # IDENT
+	parser_eat(p)   # (
+
+	let node: i32 = parser_new_node(p, NODE_FUNCDEF)
+	p.nodes[node].a = name_tok
+
+	let param_start: i32 = p.param_count
+
+	while parser_peek(p) != TOK_RPAREN:
+		if parser_peek(p) == TOK_EOF:
+			break
+		let pname: i32 = parser_eat(p)  # IDENT
+		parser_eat(p)                    # :
+		let slot: i32 = p.param_count
+		p.params[slot].name_tok = pname
+		parse_type_into(p, p.params[slot])
+		p.param_count = p.param_count + 1
+		if parser_peek(p) == TOK_COMMA:
+			parser_eat(p)
+
+	parser_eat(p)   # )
+
+	# Return-Typ
+	let ret_tok: i32 = 0
+	if parser_peek(p) == TOK_ARROW:
+		parser_eat(p)   # ->
+		ret_tok = parser_eat(p)  # TYPE
+
+	parser_eat(p)   # :
+
+	let out_count: ptr<i32> = alloc(1)
+	let body_start: i32 = parse_block(p, out_count)
+
+	p.nodes[node].b = param_start
+	p.nodes[node].c = p.param_count - param_start
+	p.nodes[node].d = body_start
+	p.nodes[node].e = out_count[0]
+	p.nodes[node].f = ret_tok
+	return node
+
+# ===== parse_struct ===== #
+
+def parse_struct(p: ptr<Parser>) -> i32:
+	parser_eat(p)   # struct
+	let name_tok: i32 = parser_eat(p)  # IDENT
+	parser_eat(p)   # :
+	parse_skip_newlines(p)
+	parser_eat(p)   # INDENT
+	parse_skip_newlines(p)
+
+	let node: i32 = parser_new_node(p, NODE_STRUCT)
+	p.nodes[node].a = name_tok
+
+	let field_start: i32 = p.field_count
+
+	while parser_peek(p) != TOK_DEDENT:
+		if parser_peek(p) == TOK_EOF:
+			break
+		parse_skip_newlines(p)
+		if parser_peek(p) == TOK_DEDENT:
+			break
+		let fname: i32 = parser_eat(p)  # IDENT
+		parser_eat(p)                    # :
+		let slot: i32 = p.field_count
+		p.fields[slot].name_tok = fname
+		parse_type_into(p, p.fields[slot])
+		p.field_count = p.field_count + 1
+		parse_skip_newlines(p)
+
+	parser_eat(p)   # DEDENT
+
+	p.nodes[node].b = field_start
+	p.nodes[node].c = p.field_count - field_start
+	return node
+
+# ===== parse_let ===== #
+
+def parse_let(p: ptr<Parser>) -> i32:
+	parser_eat(p)   # let
+	let name_tok: i32 = parser_eat(p)  # IDENT
+	parser_eat(p)   # :
+
+	let node: i32 = parser_new_node(p, NODE_LET)
+	p.nodes[node].a = name_tok
+
+	# Typ in params[0] temporär parsen
+	let tmp: ptr<Param> = alloc(1)
+	parse_type_into(p, tmp)
+	p.nodes[node].b = tmp.type_tok
+
+	parser_eat(p)   # = (OP)
+
+	let val: i32 = parse_expr(p)
+	p.nodes[node].c = val
+	return node
+
+# ===== parse_return ===== #
 
 def parse_return(p: ptr<Parser>) -> i32:
-    let node: i32 = parser_new_node(p, NODE_RETURN)
-    let val: i32 = parse_expr(p)
-    p.nodes[node].a = val
-    return node
+	parser_eat(p)   # return
+	let node: i32 = parser_new_node(p, NODE_RETURN)
+	let val: i32 = parse_expr(p)
+	p.nodes[node].a = val
+	return node
+
+# ===== parse_if ===== #
+
+def parse_if(p: ptr<Parser>) -> i32:
+	parser_eat(p)   # if
+	let cond: i32 = parse_expr(p)
+	parser_eat(p)   # :
+
+	let node: i32 = parser_new_node(p, NODE_IF)
+	p.nodes[node].a = cond
+
+	let out_count: ptr<i32> = alloc(1)
+	let then_start: i32 = parse_block(p, out_count)
+	p.nodes[node].b = then_start
+	p.nodes[node].c = out_count[0]
+
+	# else?
+	parse_skip_newlines(p)
+	if parser_peek(p) == TOK_KEYWORD:
+		if parser_peek_val(p, "else") == 1:
+			parser_eat(p)   # else
+			parser_eat(p)   # :
+			let else_start: i32 = parse_block(p, out_count)
+			p.nodes[node].d = else_start
+			p.nodes[node].e = out_count[0]
+
+	return node
+
+# ===== parse_while ===== #
+
+def parse_while(p: ptr<Parser>) -> i32:
+	parser_eat(p)   # while
+	let cond: i32 = parse_expr(p)
+	parser_eat(p)   # :
+
+	let node: i32 = parser_new_node(p, NODE_WHILE)
+	p.nodes[node].a = cond
+
+	let out_count: ptr<i32> = alloc(1)
+	let body_start: i32 = parse_block(p, out_count)
+	p.nodes[node].b = body_start
+	p.nodes[node].c = out_count[0]
+	return node
+
+# ===== parse_for ===== #
+# for i in range(N):
+
+def parse_for(p: ptr<Parser>) -> i32:
+	parser_eat(p)   # for
+	let var_tok: i32 = parser_eat(p)  # IDENT (i)
+	parser_eat(p)   # in  (KEYWORD)
+	parser_eat(p)   # range (IDENT)
+	parser_eat(p)   # (
+	let end_expr: i32 = parse_expr(p)
+	parser_eat(p)   # )
+	parser_eat(p)   # :
+
+	let node: i32 = parser_new_node(p, NODE_FOR)
+	p.nodes[node].a = var_tok
+	p.nodes[node].b = end_expr
+
+	let out_count: ptr<i32> = alloc(1)
+	let body_start: i32 = parse_block(p, out_count)
+	p.nodes[node].c = body_start
+	p.nodes[node].d = out_count[0]
+	return node
+
+# ===== parse_print ===== #
+
+def parse_print(p: ptr<Parser>) -> i32:
+	parser_eat(p)   # print (KEYWORD)
+	parser_eat(p)   # (
+	let arg: i32 = parse_expr(p)
+	parser_eat(p)   # )
+
+	let node: i32 = parser_new_node(p, NODE_FUNCCALL)
+	# name_tok zeigt auf "print" — wir haben es schon gegessen,
+	# also nutzen wir 1 als Marker für builtin print
+	p.nodes[node].a = 1
+	let arg_start: i32 = p.body_count
+	p.body[p.body_count].node = arg
+	p.body_count = p.body_count + 1
+	p.nodes[node].b = arg_start
+	p.nodes[node].c = 1
+	return node
+
+# ===== parse_import / parse_from_import ===== #
+# Import-Nodes überspringen wir im AST (werden vom Compiler
+# schon vor dem Parsen aufgelöst), geben aber einen Dummy zurück.
+
+def parse_import(p: ptr<Parser>) -> i32:
+	parser_eat(p)   # import
+	parser_eat(p)   # IDENT (module)
+	return 1
+
+def parse_from_import(p: ptr<Parser>) -> i32:
+	parser_eat(p)   # from
+	parser_eat(p)   # IDENT (module)
+	parser_eat(p)   # import (KEYWORD)
+	parser_eat(p)   # IDENT (symbol)
+	while parser_peek(p) == TOK_COMMA:
+		parser_eat(p)
+		parser_eat(p)
+	return 1
+
+# ===== parse_expr ===== #
+# Priorität: primary → binop → assign (rechts-assoziativ)
 
 def parse_expr(p: ptr<Parser>) -> i32:
-    let tok: i32 = parser_peek(p)
-    if tok == TOK_NUMBER:
-        let t: i32 = parser_eat(p)
-        let node: i32 = parser_new_node(p, NODE_NUMBER)
-        p.nodes[node].a = t
-        return node
-    if tok == TOK_IDENT:
-        let t: i32 = parser_eat(p)
-        let node: i32 = parser_new_node(p, NODE_IDENT)
-        p.nodes[node].a = t
-        return node
-    return 0
+	let left: i32 = parse_primary(p)
+
+	# BinOp: alles außer "=" und "<" ">" (die Teil von ptr<> sein könnten)
+	while parser_peek(p) == TOK_OP:
+		if tok_matches(p.source, p.tokens[p.pos].start, p.tokens[p.pos].length, "=") == 1:
+			break
+		let op_tok: i32 = parser_eat(p)
+		let right: i32 = parse_primary(p)
+		let node: i32 = parser_new_node(p, NODE_BINOP)
+		p.nodes[node].a = left
+		p.nodes[node].b = op_tok
+		p.nodes[node].c = right
+		left = node
+
+	# Zuweisung
+	if parser_peek(p) == TOK_OP:
+		if tok_matches(p.source, p.tokens[p.pos].start, p.tokens[p.pos].length, "=") == 1:
+			parser_eat(p)   # =
+			let right: i32 = parse_expr(p)
+			let node: i32 = parser_new_node(p, NODE_ASSIGN)
+			p.nodes[node].a = left
+			p.nodes[node].c = right
+			return node
+
+	return left
+
+# ===== parse_primary ===== #
+
+def parse_primary(p: ptr<Parser>) -> i32:
+	let tok: i32 = parser_peek(p)
+
+	# ( expr )
+	if tok == TOK_LPAREN:
+		parser_eat(p)
+		let inner: i32 = parse_expr(p)
+		parser_eat(p)   # )
+		return inner
+
+    if tok == TOK_OP:
+        if tok_matches(p.source, p.tokens[p.pos].start, p.tokens[p.pos].length, "-") == 1:
+            parser_eat(p)
+            let inner: i32 = parse_primary(p)
+            let node: i32 = parser_new_node(p, NODE_NEG)
+            p.nodes[node].a = inner
+            return node
+
+	# Zahl
+	if tok == TOK_NUMBER:
+		let t: i32 = parser_eat(p)
+		let node: i32 = parser_new_node(p, NODE_NUMBER)
+		p.nodes[node].a = t
+		return node
+
+	# String
+	if tok == TOK_STRING:
+		let t: i32 = parser_eat(p)
+		let node: i32 = parser_new_node(p, NODE_STRING)
+		p.nodes[node].a = t
+		return node
+
+	# IDENT: Funktion, Struct-Literal, oder Variable
+	if tok == TOK_IDENT:
+		let t: i32 = parser_eat(p)
+
+		# Struct Literal: Name { field: val, ... }
+		if parser_peek(p) == TOK_LBRACE:
+			parser_eat(p)   # {
+			let node: i32 = parser_new_node(p, NODE_STRUCTLIT)
+			p.nodes[node].a = t
+			let arg_start: i32 = p.body_count
+			while parser_peek(p) != TOK_RBRACE:
+				if parser_peek(p) == TOK_EOF:
+					break
+				parser_eat(p)   # field name (IDENT)
+				parser_eat(p)   # :
+				let val: i32 = parse_expr(p)
+				p.body[p.body_count].node = val
+				p.body_count = p.body_count + 1
+				if parser_peek(p) == TOK_COMMA:
+					parser_eat(p)
+			parser_eat(p)   # }
+			p.nodes[node].b = arg_start
+			p.nodes[node].c = p.body_count - arg_start
+			return node
+
+		# Funktionsaufruf: name(args)
+		if parser_peek(p) == TOK_LPAREN:
+			parser_eat(p)   # (
+			let node: i32 = parser_new_node(p, NODE_FUNCCALL)
+			p.nodes[node].a = t
+			let arg_start: i32 = p.body_count
+			while parser_peek(p) != TOK_RPAREN:
+				if parser_peek(p) == TOK_EOF:
+					break
+				let arg: i32 = parse_expr(p)
+				p.body[p.body_count].node = arg
+				p.body_count = p.body_count + 1
+				if parser_peek(p) == TOK_COMMA:
+					parser_eat(p)
+			parser_eat(p)   # )
+			p.nodes[node].b = arg_start
+			p.nodes[node].c = p.body_count - arg_start
+			return node
+
+		# Variable — danach ggf. chaining
+		let node: i32 = parser_new_node(p, NODE_IDENT)
+		p.nodes[node].a = t
+
+		# Chaining: .member und [index] beliebig oft
+        while 1 == 1:
+            if parser_peek(p) == TOK_DOT:
+                parser_eat(p)   # .
+                let member_tok: i32 = parser_eat(p)  # IDENT
+                let acc: i32 = parser_new_node(p, NODE_MEMBER)
+                p.nodes[acc].a = node
+                p.nodes[acc].b = member_tok
+                node = acc
+
+            if parser_peek(p) == TOK_LBRACKET:
+                parser_eat(p)   # [
+                let idx: i32 = parse_expr(p)
+                parser_eat(p)   # ]
+                let acc: i32 = parser_new_node(p, NODE_INDEX)
+                p.nodes[acc].a = node
+                p.nodes[acc].b = idx
+                node = acc
+            break
+		return node
+
+	# Fallback: leerer Node (Fehlerfall)
+	return 1
+
+# ===== main (Test) ===== #
+
+def main() -> i32:
+	let source: ptr<u8> = "def add(a: i32, b: i32) -> i32:\n    return a\n"
+	let tokens: ptr<Token> = alloc(1024)
+	let indent_stack: ptr<i32> = alloc(64)
+	let length: i32 = 46
+
+	let tok_count: i32 = tokenize(source, length, tokens, indent_stack)
+
+	let p: ptr<Parser> = alloc(1)
+	p.tokens = tokens
+	p.source = source
+	p.pos = 0
+	p.count = tok_count
+	p.nodes = alloc(4096)
+	p.node_count = 0
+	p.params = alloc(256)
+	p.param_count = 0
+	p.fields = alloc(256)
+	p.field_count = 0
+	p.body = alloc(4096)
+	p.body_count = 0
+
+	let root: i32 = parse_program(p)
+
+	print("Nodes: ")
+	print(p.node_count)
+	print("\n")
+	print("Root kind: ")
+	print(p.nodes[root].kind)
+	print("\n")
+	return 0
