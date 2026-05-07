@@ -8,6 +8,7 @@ from parser import BodyEntry
 from parser import Parser
 from parser import parse_program
 from richText import cg_putc
+from richText import printc
 
 # Node kinds
 let NODE_PROGRAM: i32 = 1
@@ -1082,44 +1083,38 @@ def codegen(p: ptr<Parser>, root: i32) -> i32:
 	cg_emit_start(cg)
 	return 0
 
+def read_file(path: ptr<u8>, buf: ptr<u8>, max_len: i32) -> i32:
+    let fd: i64 = syscall(2, path, 0, 0)
+    if fd < 0:
+        return 0
+    let n: i64 = syscall(0, fd, buf, max_len)
+    syscall(3, fd, 0, 0)
+    return type(n, "i64", "i32")
+
 # ===== main =====
 
 def main() -> i32:
-	let raw: ptr<u8> = "def main() -> i32:\n    return 42\n"
-    let source: ptr<u8> = alloc(256)
-    let length: i32 = unescape(raw, source, 33)
-	let tokens: ptr<Token> = alloc(2048)
-	let indent_stack: ptr<i32> = alloc(64)
-    print(length)
-    print("\n")
+    let source: ptr<u8> = alloc(65536)
+    let length: i32 = read_file("test.co", source, 65536)
+    let tokens: ptr<Token> = alloc(2048)
+    let indent_stack: ptr<i32> = alloc(64)
     let tok_count: i32 = tokenize(source, length, tokens, indent_stack)
-    print(tok_count)
-    print("\n")
-	let p: ptr<Parser> = alloc(1)
-	p.tokens = tokens
-	p.source = source
-	p.pos = 0
-	p.count = tok_count
-	p.nodes = alloc(4096)
-	p.node_count = 0
-	p.params = alloc(256)
-	p.param_count = 0
-	p.fields = alloc(256)
-	p.field_count = 0
-	p.body = alloc(4096)
-	p.body_count = 0
+    let p: ptr<Parser> = alloc(1)
+    p.tokens = tokens
+    p.source = source
+    p.pos = 0
+    p.count = tok_count
+    p.nodes = alloc(4096)
+    p.node_count = 0
+    p.params = alloc(256)
+    p.param_count = 0
+    p.fields = alloc(256)
+    p.field_count = 0
+    p.body = alloc(4096)
+    p.body_count = 0
+    let root: i32 = parse_program(p)
+    codegen(p, root)
 
-	let root: i32 = parse_program(p)
-
-    print(p.body[1].node)  # sollte FUNCDEF sein
-    print(p.nodes[p.body[1].node].kind)
-    print(p.nodes[p.body[1].node].a)
-
-    print(p.nodes[root].b)
-    print("\n")
-
-    print(p.nodes[root].c)
-    print("\n")
-
-	codegen(p, root)
-	return 0
+    print("\nnodes: ")
+    print(p.node_count)
+    return 0

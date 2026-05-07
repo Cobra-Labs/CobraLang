@@ -4,6 +4,7 @@ import subprocess
 import os
 import sys
 import re
+from os import name
 
 DATATYPES = {
     'i8', 'i16', 'i32', 'i64',
@@ -21,7 +22,7 @@ KEYWORDS = {
 
 TOKEN_PATTERNS = [
     ("COMMENT",  r"#[^\n]*"),
-    ("STRING",   r'"[^"]*"'),
+    ("STRING",   r'"(?:[^\\"]|\\.)*"'),
     ("ARROW",    r"->"),
     ("NUMBER",   r"0x[0-9a-fA-F]+|\d+"),
     ("CHAR",     r"'\\?.'"),  # matched 'x' und '\n'
@@ -539,6 +540,7 @@ BUILTINS = {
     "streq",
     "isinstance",
     "sleep",
+    "type",
 }
 
 # typechecker.py
@@ -618,6 +620,8 @@ class TypeChecker:
         if isinstance(node.value, FuncCall) and node.value.name == "alloc":
             self.scope[node.name] = node.type
             return
+        if isinstance(value_type, StringLit):
+            value_type = value_type.value
 
         # ptr<Struct> erlauben
         declared = node.type
@@ -679,13 +683,14 @@ class TypeChecker:
 
         if isinstance(node, FuncCall):
             if node.name in BUILTINS:
-                if node.name == "syscall": return "i64"
-                if node.name == "cast":    return "ptr<u8>"  # Platzhalter
-                if node.name == "print": return "void"
-                if node.name == "alloc": return "ptr<i32>"
-                if node.name == "streq": return "bool"
+                if node.name == "syscall":  return "i64"
+                if node.name == "cast":     return "ptr<u8>"  # Platzhalter
+                if node.name == "print":    return "void"
+                if node.name == "alloc":    return "ptr<i32>"
+                if node.name == "streq":    return "bool"
                 if node.name == "isinstance": return "bool"
-                if node.name == "sleep": return "void"
+                if node.name == "sleep":    return "void"
+                if node.name == "type":     return node.args[2]
 
             if node.name not in self.funcs:
                 return "i32"
@@ -710,6 +715,10 @@ class TypeChecker:
                 # Pointer-Kompatibilität
                 if left.startswith("ptr<") and right.startswith("ptr<"):
                     return left
+                if isinstance(left, StringLit):
+                    return left.value
+                if isinstance(right, StringLit):
+                    return right.value
                 raise TypeError(f"Typ-Mismatch in BinOp: {left} {node.op} {right}")
             return left
 
@@ -880,9 +889,10 @@ entry:
         for pname, ptype in node.params:
             llty = self.cobra_type_to_llvm(ptype)
             ptr = self.fresh()
-            self.emit(f"  {ptr} = alloca {llty}")
-            self.emit(f"  store {llty} %{pname}, {llty}* {ptr}")
-            self.scope[pname] = (ptr, llty, True)
+            if llty != "void":
+                self.emit(f"  {ptr} = alloca {llty}")
+                self.emit(f"  store {llty} %{pname}, {llty}* {ptr}")
+                self.scope[pname] = (ptr, llty, True)
 
         self.entry_alloca_pos = len(self.output)  # NEU: nach param-allocas
 
@@ -925,14 +935,16 @@ entry:
 
         ptr = self.fresh()
         # alloca in entry-Block einfügen statt hier
-        self.output.insert(self.entry_alloca_pos, f"  {ptr} = alloca {ty}")
-        self.entry_alloca_pos += 1  # weil wir eine Zeile eingefügt haben
+        if ty != "void":
+            self.output.insert(self.entry_alloca_pos, f"  {ptr} = alloca {ty}")
+            self.entry_alloca_pos += 1  # weil wir eine Zeile eingefügt haben
 
-        self.emit(f"  store {ty} {reg}, {ty}* {ptr}")
-        self.scope[node.name] = (ptr, ty, True)
+            self.emit(f"  store {ty} {reg}, {ty}* {ptr}")
+            self.scope[node.name] = (ptr, ty, True)
 
     def gen_return(self, node: ReturnStmt):
         reg, type = self.gen_expr(node.value)
+        print(f"  ret {type} {reg}")
         self.emit(f"  ret {type} {reg}")
 
     def gen_expr(self, node) -> tuple[str, str] | None:
@@ -984,10 +996,10 @@ entry:
                         val_reg, val_ty = self.gen_alloc(node.right, field_type)
                     else:
                         val_reg, val_ty = self.gen_expr(node.right)
-
-                    gep = self.fresh()
-                    self.emit(f"  {gep} = getelementptr %{struct_name}, %{struct_name}* {ptr_reg}, i32 0, i32 {idx}")
-                    self.emit(f"  store {field_type} {val_reg}, {field_type}* {gep}")
+                    if field_type != "void":
+                        gep = self.fresh()
+                        self.emit(f"  {gep} = getelementptr %{struct_name}, %{struct_name}* {ptr_reg}, i32 0, i32 {idx}")
+                        self.emit(f"  store {field_type} {val_reg}, {field_type}* {gep}")
                     return val_reg, val_ty
 
                 # alloc auf der rechten Seite bei einfachem Ident-Assignment
@@ -1000,15 +1012,15 @@ entry:
                 else:
                     reg, ty = self.gen_expr(node.right)
 
-                if isinstance(node.left, Ident):
+                if isinstance(node.left, Ident) and ty != "void":
                     ptr, _, _ = self.scope[node.left.name]
                     self.emit(f"  store {ty} {reg}, {ty}* {ptr}")
                 if isinstance(node.left, IndexAccess):
                     ptr_reg, _ = self.gen_expr(node.left.obj)
                     idx_reg, _ = self.gen_expr(node.left.index)
                     gep_reg = self.fresh()
-                    self.emit(f"  {gep_reg} = getelementptr i32, i32* {ptr_reg}, i32 {idx_reg}")
-                    self.emit(f"  store i32 {reg}, i32* {gep_reg}")
+                    self.emit(f"  {gep_reg} = getelementptr {ty}, {ty}* {ptr_reg}, i32 {idx_reg}")
+                    self.emit(f"  store {ty} {reg}, {ty}* {gep_reg}")
                     return reg, ty
                 return reg, ty
 
@@ -1042,6 +1054,8 @@ entry:
         if node.name == "sleep":
             ms_reg, _ = self.gen_expr(node.args[0])
             return self.gen_sleep(ms_reg)
+        if node.name == "type":
+            return self.gen_type(node)
 
         args = [self.gen_expr(a) for a in node.args]
         args_ir = ", ".join(f"{t} {r}" for r, t in args)
@@ -1078,6 +1092,7 @@ entry:
             else:
                 processed.append((r, t))
 
+
         vals = ", ".join(f"{t} {r}" for r, t in processed)
         constraints = "={ax},{ax},{di},{si},{dx},~{dirflag},~{fpsr},~{flags}"
         reg = self.fresh()
@@ -1111,6 +1126,20 @@ entry:
         constraints = "={ax},{ax},{di},{si},~{rcx},~{r11},~{flags}"
         self.emit(f'  {res} = call i64 asm sideeffect "syscall", "{constraints}"(i64 35, i64 {ptr_int}, i64 0)')
         return "0", "void"
+
+    def gen_type(self, node: FuncCall):
+        val_reg, val_ty, is_alloca = self.scope[node.args[0].name]
+
+        if is_alloca:
+            loaded_val = self.fresh()
+            self.emit(f"  {loaded_val} = load {val_ty}, {val_ty}* {val_reg}")
+            current_reg = loaded_val
+        else:
+            current_reg = val_reg
+
+        target_reg = self.fresh()
+        self.emit(f"  {target_reg} = trunc {val_ty} {current_reg} to i8")
+        return "0", self.cobra_type_to_llvm(node.args[2].value)
 
     def gen_structdef(self, node: StructDef):
         type_id = len(self.structs) + 1
