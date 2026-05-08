@@ -1,4 +1,7 @@
 from richText import printc
+from util import len
+from util import min
+from util import max
 
 struct CobraError:
     code: i32        # E001, E002...
@@ -37,8 +40,15 @@ def print_error(err: ptr<CobraError>, source: ptr<u8>) -> i32:
 
     # ^^^
     printc("   | ", "none", "bold")
-    print("")
-    printc("^^^", "red", "bold")
+    let c: i32 = 0
+    while c != err.col:
+        c = c + 1
+        if c != 1:
+            print(" ")
+    let i: i32 = 0
+    while i < err.length:
+        printc("^", "red", "bold")
+        i = i + 1
     print(" ")
     printcln(err.message, "red", "none")
 
@@ -54,19 +64,78 @@ def print_source_line(source: ptr<u8>, line: i32) -> i32:
     return 0
 
 def raise_error(type: ptr<u8>, file: ptr<u8>, line: i32, col: i32, len: i32, source: ptr<u8>, keyword: ptr<u8>, hint: ptr<u8>) -> i32:
+    let err: ptr<CobraError> = alloc(100)
+    err.message = keyword
+    err.file = file
+    err.line = line
+    err.col = col
+    err.length = len
+    err.hint = hint
     if streq(type, "SyntaxError"):
-        let err: ptr<CobraError> = alloc(100)
         err.code = 1
         err.name = "SyntaxError"
-        err.message = keyword
-        err.file = file
-        err.line = line
-        err.col = col
-        err.length = len
-        err.hint = hint
+        print_error(err, source)
+    if streq(type, "KeyError"):
+        err.code = 2
+        err.name = "KeyError"
         print_error(err, source)
     return 0
 
+
+
+def levenshtein(s1: ptr<u8>, s2: ptr<u8>) -> i32:
+    let len1: i32 = len(s1)
+    let len2: i32 = len(s2)
+
+    # v0 und v1 groß genug reservieren
+    let v0: ptr<i32> = alloc((len2 + 1) * 4)
+    print("\nnach v0")
+    let v1: ptr<i32> = alloc((len2 + 1) * 4)
+
+    let i: i32 = 0
+    while i <= len2:
+        v0[i] = i
+        i = i + 1
+
+    i = 0
+    while i < len1:
+        v1[0] = i + 1
+
+        let j: i32 = 0
+        while j < len2:
+            # WICHTIG: Expliziter Vergleich
+            let cost: i32 = 1
+            if s1[i] == s2[j]:
+                cost = 0
+
+            # Die drei Wege berechnen
+            let del_cost: i32 = v0[j + 1] + 1
+            let ins_cost: i32 = v1[j] + 1
+            let sub_cost: i32 = v0[j] + cost
+
+            # Manuelles Minimum (Sicherer als Pointer-Array)
+            let res: i32 = del_cost
+            if ins_cost < res:
+                res = ins_cost
+            if sub_cost < res:
+                res = sub_cost
+
+            v1[j + 1] = res
+            j = j + 1
+
+        # Manuelles Kopieren statt Swap (um Pointer-Fehler auszuschließen)
+        let k: i32 = 0
+        while k <= len2:
+            v0[k] = v1[k]
+            k = k + 1
+
+        i = i + 1
+
+    return v0[len2]
+
 def main() -> i32:
-    raise_error("SyntaxError", "main.co", 1, 1, 3, "dee main() -> i32:", "'dee' existiert nicht", "Meintest du 'def'?")
+    # raise_error("SyntaxError", "main.co", 1, 1, 3, "dee main() -> i32:", "'dee' existiert nicht", "Meintest du 'def'?")
+    # raise_error("KeyError", "main.co", 3, 11, 1, "i = array[b]", "'b' existiert nicht", "Meintest du ...?")
+    let i: i32 = levenshtein("dee", "def")
+    print(i)
     return 0

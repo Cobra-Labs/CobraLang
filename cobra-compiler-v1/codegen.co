@@ -1057,7 +1057,11 @@ def codegen(p: ptr<Parser>, root: i32) -> i32:
 	cg.scope_count = 0
 
 	let body_start: i32 = p.nodes[root].b
-    let body_count: i32 = p.nodes[root].c
+	let body_count: i32 = p.nodes[root].c
+    print(body_start)
+    print("\n")
+    print(body_count)
+    print("\n")
 
 	# 1. Structs registrieren
 	let i: i32 = 0
@@ -1113,8 +1117,7 @@ def main() -> i32:
     p.body = alloc(4096)
     p.body_count = 0
     let root: i32 = parse_program(p)
-    codegen(p, root)
-
-    print("\nnodes: ")
     print(p.node_count)
+    print("\n")
+    codegen(p, root)
     return 0

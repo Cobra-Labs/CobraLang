@@ -1,10 +1,11 @@
 #!/usr/bin/python3
 import argparse
+import functools
 import subprocess
 import os
 import sys
 import re
-from os import name
+import time
 
 DATATYPES = {
     'i8', 'i16', 'i32', 'i64',
@@ -43,6 +44,33 @@ TOKEN_PATTERNS = [
 ]
 
 MASTER = "|".join(f"(?P<{n}>{p})" for n, p in TOKEN_PATTERNS)
+
+def timer(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+
+        # Die eigentliche Funktion ausführen
+        result = func(*args, **kwargs)
+        # Zeitdifferenz berechnen
+        elapsed = int(time.time() - start_time)
+
+        # Zeit-Logik für das String-Format
+        hours = elapsed // 3600
+        minutes = (elapsed % 3600) // 60
+        seconds = elapsed % 60
+        if hours > 0:
+            time_elapsed = f"{hours}h {minutes:02d}m {seconds:02d}s"
+        elif minutes > 0:
+            time_elapsed = f"{minutes}m {seconds:02d}s"
+        else:
+            time_elapsed = f"{seconds}s"
+
+        print(f"\x1b[32m\x1b[1m[+] Finished in {time_elapsed}\x1b[0m")
+
+        return result
+
+    return wrapper
 
 class CobraError(Exception):
     def __init__(self, message, source, line, col, file="<stdin>"):
@@ -944,7 +972,6 @@ entry:
 
     def gen_return(self, node: ReturnStmt):
         reg, type = self.gen_expr(node.value)
-        print(f"  ret {type} {reg}")
         self.emit(f"  ret {type} {reg}")
 
     def gen_expr(self, node) -> tuple[str, str] | None:
@@ -1079,22 +1106,47 @@ entry:
             self.emit(f"  call void @__cobra_print_int(i32 {reg})")
             return "%0", "void"
 
+        if ty == "i64":
+            # i64 → i32 truncaten für print
+            trunc_reg = self.fresh()
+            self.emit(f"  {trunc_reg} = trunc i64 {reg} to i32")
+            self.emit(f"  call void @__cobra_print_int(i32 {trunc_reg})")
+            return "%0", "void"
+
+        if ty == "i8":
+            char_ptr = self.fresh()
+            self.emit(f"  {char_ptr} = alloca i8")
+            self.emit(f"  store i8 {reg}, i8* {char_ptr}")
+            syscall_reg = self.fresh()
+            constraints = "={ax},{ax},{di},{si},{dx},~{dirflag},~{fpsr},~{flags}"
+            self.emit(
+                f'  {syscall_reg} = call i64 asm sideeffect "syscall", "{constraints}"('
+                f'i64 1, i64 1, i8* {char_ptr}, i64 1)'
+            )
+            return syscall_reg, "void"
+
         raise NotImplementedError(f"print() für Typ {ty} noch nicht implementiert")
 
     def gen_syscall(self, node: FuncCall) -> tuple[str, str]:
         processed = []
         for a in node.args:
             r, t = self.gen_expr(a)
-            if t == "i32":  # Syscalls brauchen i64
+            if t == "i32":
                 nr = self.fresh()
                 self.emit(f"  {nr} = sext i32 {r} to i64")
                 processed.append((nr, "i64"))
-            else:
+            elif t == "i64":
                 processed.append((r, t))
+            else:
+                nr = self.fresh()
+                self.emit(f"  {nr} = ptrtoint {t} {r} to i64")
+                processed.append((nr, "i64"))
 
+        regs = ["{ax}", "{di}", "{si}", "{dx}", "{r10}", "{r8}", "{r9}"]
+        input_constraints = ",".join(regs[:len(processed)])
+        constraints = f"={{ax}},{input_constraints},~{{dirflag}},~{{fpsr}},~{{flags}}"
 
         vals = ", ".join(f"{t} {r}" for r, t in processed)
-        constraints = "={ax},{ax},{di},{si},{dx},~{dirflag},~{fpsr},~{flags}"
         reg = self.fresh()
         self.emit(f'  {reg} = call i64 asm sideeffect "syscall", "{constraints}"({vals})')
         return reg, "i64"
@@ -1138,8 +1190,9 @@ entry:
             current_reg = val_reg
 
         target_reg = self.fresh()
-        self.emit(f"  {target_reg} = trunc {val_ty} {current_reg} to i8")
-        return "0", self.cobra_type_to_llvm(node.args[2].value)
+        target_llty = self.cobra_type_to_llvm(node.args[2].value)
+        self.emit(f"  {target_reg} = trunc {val_ty} {current_reg} to {target_llty}")
+        return target_reg, target_llty
 
     def gen_structdef(self, node: StructDef):
         type_id = len(self.structs) + 1
@@ -1417,7 +1470,7 @@ def resolve_imports(tree, source_dir, visited=None):
             new_body.append(node)
     return Program(new_body)
 
-
+@timer
 def main():
     arg_parser = argparse.ArgumentParser(description="CobraLang Compiler")
     arg_parser.add_argument("input", help="Eingabedatei (.co)")
