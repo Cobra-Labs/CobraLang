@@ -181,18 +181,27 @@ def parse_type_into(p: ptr<Parser>, slot: ptr<Param>) -> i32:
 # ===== parse_program ===== #
 
 def parse_program(p: ptr<Parser>) -> i32:
-	let root: i32 = parser_new_node(p, NODE_PROGRAM)
-	let body_start: i32 = p.body_count
-	parse_skip_newlines(p)
-	while parser_peek(p) != TOK_EOF:
-		let stmt: i32 = parse_stmt(p)
-		if stmt >= 0:
-			p.body[p.body_count].node = stmt
-			p.body_count = p.body_count + 1
-		parse_skip_newlines(p)
-	p.nodes[root].b = body_start
-	p.nodes[root].c = p.body_count - body_start
-	return root
+    let root: i32 = parser_new_node(p, NODE_PROGRAM)
+    let body_start: i32 = p.body_count
+    parse_skip_newlines(p)
+    while parser_peek(p) != TOK_EOF:
+        let stmt: i32 = parse_stmt(p)
+        print(stmt)
+        print("\n")
+        let is_valid: i32 = 0
+        if stmt == 0:
+            is_valid = 1
+        if stmt > 0:
+            is_valid = 1
+        if is_valid == 1:
+            p.body[p.body_count].node = stmt
+            p.body_count = p.body_count + 1
+        print(p.body_count)
+        print("\n")
+        parse_skip_newlines(p)
+    p.nodes[root].b = body_start
+    p.nodes[root].c = p.body_count - body_start
+    return root
 
 # ===== parse_block ===== #
 # Gibt body_start zurück. Schreibt body_count in out_count[0].
@@ -305,6 +314,10 @@ def parse_funcdef(p: ptr<Parser>) -> i32:
 	p.nodes[node].d = body_start
 	p.nodes[node].e = out_count[0]
 	p.nodes[node].f = ret_tok
+    print(body_start)
+    print("\n")
+    print(out_count[0])
+    print("\n")
 	return node
 
 # ===== parse_struct ===== #

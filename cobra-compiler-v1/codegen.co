@@ -1030,11 +1030,20 @@ def cg_gen_funcdef(cg: ptr<Codegen>, node_idx: i32) -> i32:
 		i = i + 1
 
 	print("  ret i32 0\n}\n\n")
+    print(name_tok)
+    print("\n")
+    print(cg.p.tokens[name_tok].start)
+    print("\n")
+    print(cg.p.tokens[name_tok].length)
+    print("\n")
 	return 0
 
 # ===== Haupt-Codegen =====
 
 def codegen(p: ptr<Parser>, root: i32) -> i32:
+    print("\nroot: ")
+    print(root)
+    print("\n")
 	let cg: ptr<Codegen> = alloc(1)
 	cg.p = p
 	cg.tmp = 0
@@ -1058,34 +1067,40 @@ def codegen(p: ptr<Parser>, root: i32) -> i32:
 
 	let body_start: i32 = p.nodes[root].b
 	let body_count: i32 = p.nodes[root].c
-    print(body_start)
+	print(body_start)
     print("\n")
-    print(body_count)
+	print(body_count)
     print("\n")
 
 	# 1. Structs registrieren
-	let i: i32 = 0
-	while i < body_count:
-		let node_idx: i32 = p.body[body_start + i].node
-		if p.nodes[node_idx].kind == NODE_STRUCT:
-			cg_register_struct(cg, node_idx)
-		i = i + 1
+    let i: i32 = 0
+    while i < p.body_count:
+        let node_idx: i32 = p.body[i].node
+        if p.nodes[node_idx].kind == NODE_STRUCT:
+            cg_register_struct(cg, node_idx)
+        i = i + 1
 
-	# 2. Header ausgeben
-	cg_emit_builtins(cg)
-	cg_emit_struct_defs(cg)
+    # 2. Header ausgeben
+    cg_emit_builtins(cg)
+    cg_emit_struct_defs(cg)
 
-	# 3. Funktionen ausgeben
-	i = 0
-	while i < body_count:
-		let node_idx: i32 = p.body[body_start + i].node
-		if p.nodes[node_idx].kind == NODE_FUNCDEF:
-			cg_gen_funcdef(cg, node_idx)
-		i = i + 1
+    # 3. Funktionen ausgeben
+    i = 0
+    while i < p.body_count:
+        let node_idx: i32 = p.body[i].node
+        if p.nodes[node_idx].kind == NODE_FUNCDEF:
+            cg_gen_funcdef(cg, node_idx)
+        i = i + 1
 
-	# 4. _start
-	cg_emit_start(cg)
-	return 0
+    # 4. _start
+    cg_emit_start(cg)
+    print(p.nodes[1].a)
+    print("\n")
+    print(p.nodes[1].b)
+    print("\n")
+    print(p.nodes[1].c)
+    print("\n")
+    return 0
 
 def read_file(path: ptr<u8>, buf: ptr<u8>, max_len: i32) -> i32:
     let fd: i64 = syscall(2, path, 0, 0)
@@ -1117,7 +1132,15 @@ def main() -> i32:
     p.body = alloc(4096)
     p.body_count = 0
     let root: i32 = parse_program(p)
-    print(p.node_count)
+    #print(p.node_count)
+    #print("\ntok_count: ")
+    #print(tok_count)
+    #print("\nlength: ")
+    #print(length)
+    #print("\n")
+    print(p.nodes[1].d)
+    print("\n")
+    print(p.nodes[1].e)
     print("\n")
     codegen(p, root)
     return 0
