@@ -29,28 +29,28 @@ struct Token:
 	line: i32
 
 def is_alpha(c: u8) -> i32:
-	if c >= 'a':
-		if c <= 'z':
-			return 1
-	if c >= 'A':
-		if c <= 'Z':
-			return 1
-	if c == '_':
-		return 1
-	return 0
+    if c >= 'a':
+        if c <= 'z':
+            return 1
+    if c >= 'A':
+        if c <= 'Z':
+            return 1
+    if c == '_':
+        return 1
+    return 0
 
 def is_digit(c: u8) -> i32:
-	if c >= '0':
-		if c <= '9':
-			return 1
-	return 0
+    if c >= '0':
+        if c <= '9':
+            return 1
+    return 0
 
 def is_alnum(c: u8) -> i32:
-	if is_alpha(c) == 1:
-		return 1
-	if is_digit(c) == 1:
-		return 1
-	return 0
+    if is_alpha(c) == 1:
+        return 1
+    if is_digit(c) == 1:
+        return 1
+    return 0
 
 # ===== Tokenize ===== #
 
@@ -74,36 +74,45 @@ def tokenize(source: ptr<u8>, length: i32, tokens: ptr<Token>, indent_stack: ptr
 			i = i + 1
 			continue
 
-		# Whitespace / Indent
-		if c == ' ':
-			if at_line_start == 1:
-				let spaces: i32 = 0
-				while i < length:
-					if source[i] == ' ':
-						spaces = spaces + 1
-						i = i + 1
-					else:
-						break
-				if spaces > indent_stack[indent_depth]:
-					indent_depth = indent_depth + 1
-					indent_stack[indent_depth] = spaces
-					tokens[tok_count].type = TOK_INDENT
-					tokens[tok_count].line = line
-					tok_count = tok_count + 1
-				while indent_depth > 0:
-					if spaces < indent_stack[indent_depth]:
-						indent_depth = indent_depth - 1
-						tokens[tok_count].type = TOK_DEDENT
-						tokens[tok_count].line = line
-						tok_count = tok_count + 1
-					else:
-						break
-				at_line_start = 0
-				continue
-			i = i + 1
-			continue
+        # Whitespace / Indent
+        if c == ' ':
+            if at_line_start == 1:
+                let spaces: i32 = 0
+                while i < length:
+                    if source[i] == ' ':
+                        spaces = spaces + 1
+                        i = i + 1
+                    else:
+                        break
+                if spaces > indent_stack[indent_depth]:
+                    indent_depth = indent_depth + 1
+                    indent_stack[indent_depth] = spaces
+                    tokens[tok_count].type = TOK_INDENT
+                    tokens[tok_count].line = line
+                    tok_count = tok_count + 1
+                while indent_depth > 0:
+                    if spaces < indent_stack[indent_depth]:
+                        indent_depth = indent_depth - 1
+                        tokens[tok_count].type = TOK_DEDENT
+                        tokens[tok_count].line = line
+                        tok_count = tok_count + 1
+                    else:
+                        break
+                at_line_start = 0
+                continue
+            i = i + 1
+            continue
 
-		if c == '\t':
+        # Kein Space aber Zeilenanfang → volle Dedent auf Tiefe 0
+        if at_line_start == 1:
+            while indent_depth > 0:
+                indent_depth = indent_depth - 1
+                tokens[tok_count].type = TOK_DEDENT
+                tokens[tok_count].line = line
+                tok_count = tok_count + 1
+            at_line_start = 0
+
+        if c == '\t':
 			i = i + 1
 			continue
 		at_line_start = 0
@@ -291,14 +300,17 @@ def tokenize(source: ptr<u8>, length: i32, tokens: ptr<Token>, indent_stack: ptr
 	return tok_count
 
 def tok_matches(source: ptr<u8>, start: i32, length: i32, word: ptr<u8>) -> i32:
-	let j: i32 = 0
-	while j < length:
-		if source[start + j] != word[j]:
-			return 0
-		j = j + 1
-	if word[j] != 0:
-		return 0
-	return 1
+    let word_len: i32 = 0
+    while word[word_len] != 0:
+        word_len = word_len + 1
+    if length != word_len:
+        return 0
+    let j: i32 = 0
+    while j < length:
+        if source[start + j] != word[j]:
+            return 0
+        j = j + 1
+    return 1
 
 def unescape(src: ptr<u8>, dst: ptr<u8>, len: i32) -> i32:
     let i: i32 = 0

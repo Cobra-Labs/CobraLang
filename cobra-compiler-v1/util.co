@@ -27,5 +27,24 @@ def max(arr: ptr<i32>, length: i32) -> i32:
 
     return largest
 
+def read_file(path: ptr<u8>, buf: ptr<u8>, max_len: i32) -> i32:
+    let fd: i64 = syscall(2, path, 0, 0)
+    if fd < 0:
+        return 0
+    let n: i64 = syscall(0, fd, buf, max_len)
+    syscall(3, fd, 0, 0)
+    return type(n, "i64", "i32")
+
+def print_int(n: i32) -> i32:
+    if n < 0:
+        cg_putc('-')
+        n = 0 - n
+    if n > 9:
+        print_int(n / 10)
+    let digit: i32 = (n % 10) + 48
+    let c: u8 = type(digit, "i32", "u8")
+    cg_putc(c)
+    return 0
+
 def main() -> i32:
     return 0

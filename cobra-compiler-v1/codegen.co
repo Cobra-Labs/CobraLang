@@ -9,6 +9,9 @@ from parser import Parser
 from parser import parse_program
 from richText import cg_putc
 from richText import printc
+from util import read_file
+from util import print_int
+from parser import print_token_type
 
 # Node kinds
 let NODE_PROGRAM: i32 = 1
@@ -543,7 +546,7 @@ def cg_gen_assign(cg: ptr<Codegen>, node_idx: i32) -> i32:
 	return val
 
 def cg_gen_call(cg: ptr<Codegen>, node_idx: i32) -> i32:
-	let n: ptr<ASTNode> = cg.p.nodes
+    let n: ptr<ASTNode> = cg.p.nodes
 	let name_tok: i32 = n[node_idx].a
 	let arg_start: i32 = n[node_idx].b
 	let arg_count: i32 = n[node_idx].c
@@ -619,7 +622,7 @@ def cg_gen_call(cg: ptr<Codegen>, node_idx: i32) -> i32:
 		if i > 0:
 			print(", ")
 		print("i32 %t")
-		cg_print_int(arg_regs[i])
+        cg_print_int(arg_regs[i])
 		i = i + 1
 	print(")\n")
 	return t
@@ -1084,41 +1087,49 @@ def codegen(p: ptr<Parser>, root: i32) -> i32:
     cg_emit_start(cg)
     return 0
 
-def read_file(path: ptr<u8>, buf: ptr<u8>, max_len: i32) -> i32:
-    let fd: i64 = syscall(2, path, 0, 0)
-    if fd < 0:
-        return 0
-    let n: i64 = syscall(0, fd, buf, max_len)
-    syscall(3, fd, 0, 0)
-    return type(n, "i64", "i32")
+
 
 # ===== main =====
 
 def main() -> i32:
-    let source: ptr<u8> = alloc(65536)
+    let source: ptr<u8> = alloc(2097152)
     let length: i32 = read_file("test.co", source, 65536)
-    let tokens: ptr<Token> = alloc(2048)
-    let indent_stack: ptr<i32> = alloc(64)
+    let tokens: ptr<Token> = alloc(2097152)
+    let indent_stack: ptr<i32> = alloc(2097152)
     let tok_count: i32 = tokenize(source, length, tokens, indent_stack)
+
+    # DEBUG: alle Tokens ausgeben
+    #let di: i32 = 0
+    #while di < tok_count:
+    #    print_int(di)
+    #    print(": type=")
+    #    print(tokens[di].type)
+    #    print("\n")
+    #    di = di + 1
     let p: ptr<Parser> = alloc(1)
     p.tokens = tokens
     p.source = source
     p.pos = 0
     p.count = tok_count
-    p.nodes = alloc(4096)
+    p.nodes = alloc(2097152)
     p.node_count = 0
-    p.params = alloc(256)
+    p.params = alloc(2097152)
     p.param_count = 0
-    p.fields = alloc(256)
+    p.fields = alloc(2097152)
     p.field_count = 0
-    p.body = alloc(4096)
+    p.body = alloc(20000000)
     p.body_count = 0
-    let root: i32 = parse_program(p)
-    #print(p.node_count)
-    #print("\ntok_count: ")
-    #print(tok_count)
-    #print("\nlength: ")
-    #print(length)
+    #print("Token count: ")
+    #print_int(tok_count)
     #print("\n")
+    #let ti: i32 = 0
+    #while ti < tok_count:
+    #    print("Token ")
+    #    print(ti)
+    #    print(" type=")
+    #    print_token_type(tokens[ti].type)
+    #    print("\n")
+    #    ti = ti + 1
+    let root: i32 = parse_program(p)
     codegen(p, root)
     return 0
